@@ -369,6 +369,24 @@ def _summary_job_worker(job_id: str) -> None:
             SUMMARY_JOBS[job_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
 
 
+def _declare_primary_queue(channel: Any, queue_name: str) -> Any:
+    """Declare primary queue with DLX, falling back for pre-existing legacy queues."""
+    try:
+        channel.queue_declare(
+            queue=queue_name,
+            durable=True,
+            arguments={"x-dead-letter-exchange": DLX_EXCHANGE},
+        )
+        return channel
+    except pika.exceptions.ChannelClosedByBroker as exc:
+        if "x-dead-letter-exchange" not in str(exc):
+            raise
+
+        fallback_channel = channel.connection.channel()
+        fallback_channel.queue_declare(queue=queue_name, durable=True)
+        return fallback_channel
+
+
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
 
@@ -427,11 +445,7 @@ def ingest_defect(defect: Defect) -> dict[str, Any]:
         channel.exchange_declare(exchange=DLX_EXCHANGE, exchange_type="direct", durable=True)
         channel.queue_declare(queue=DLQ_NAME, durable=True)
         channel.queue_bind(queue=DLQ_NAME, exchange=DLX_EXCHANGE, routing_key=QUEUE_NAME)
-        channel.queue_declare(
-            queue=QUEUE_NAME,
-            durable=True,
-            arguments={"x-dead-letter-exchange": DLX_EXCHANGE},
-        )
+        channel = _declare_primary_queue(channel, QUEUE_NAME)
         channel.basic_publish(
             exchange="",
             routing_key=QUEUE_NAME,

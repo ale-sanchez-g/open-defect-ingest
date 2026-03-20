@@ -137,6 +137,29 @@ def _record_processing_metrics(success: bool, elapsed_ms: int) -> None:
     METRICS["window_processed_start"] = METRICS["processed_total"]
 
 
+def _declare_primary_queue(channel: Any, queue_name: str) -> Any:
+    """Declare primary queue with DLX, falling back for pre-existing legacy queues."""
+    try:
+        channel.queue_declare(
+            queue=queue_name,
+            durable=True,
+            arguments={"x-dead-letter-exchange": DLX_EXCHANGE},
+        )
+        return channel
+    except pika.exceptions.ChannelClosedByBroker as exc:
+        if "x-dead-letter-exchange" not in str(exc):
+            raise
+
+        logger.warning(
+            "Queue '%s' already exists without DLX configuration; continuing without DLX on this queue. "
+            "Delete and recreate queue to enforce DLQ routing.",
+            queue_name,
+        )
+        fallback_channel = channel.connection.channel()
+        fallback_channel.queue_declare(queue=queue_name, durable=True)
+        return fallback_channel
+
+
 # ── RabbitMQ callback ─────────────────────────────────────────────────────────
 
 def process_message(ch: Any, method: Any, properties: Any, body: bytes) -> None:
@@ -172,11 +195,7 @@ def start_consumer(
     channel.exchange_declare(exchange=DLX_EXCHANGE, exchange_type="direct", durable=True)
     channel.queue_declare(queue=DLQ_NAME, durable=True)
     channel.queue_bind(queue=DLQ_NAME, exchange=DLX_EXCHANGE, routing_key=queue_name)
-    channel.queue_declare(
-        queue=queue_name,
-        durable=True,
-        arguments={"x-dead-letter-exchange": DLX_EXCHANGE},
-    )
+    channel = _declare_primary_queue(channel, queue_name)
     channel.basic_qos(prefetch_count=prefetch_count)
     channel.basic_consume(queue=queue_name, on_message_callback=process_message)
     logger.info(

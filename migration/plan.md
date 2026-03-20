@@ -140,8 +140,8 @@ Use this table to track execution state. Update after every completed step.
 | P3-1 | 3 | Make prefetch_count configurable | Copilot | DONE | 2026-03-20T04:32:35Z | 2026-03-20T04:46:49Z | Added configurable PREFETCH_COUNT in ingestor and compose/env wiring. Files: ingestor/main.py, docker-compose.yml, .env.example, ingestor/tests/test_ingestor.py. Validation: docker run --rm -v "$PWD/ingestor:/work" -w /work python:3.12-slim sh -lc "pip install -q -r requirements.txt && pytest tests/test_ingestor.py -q" -> 8 passed. Rollback: set PREFETCH_COUNT=1. |
 | P3-2 | 3 | Enable worker horizontal scaling | Copilot | DONE | 2026-03-20T04:46:49Z | 2026-03-20T04:49:21Z | Added and documented horizontal scaling workflow for ingestor workers via make scale-ingestor REPLICAS=<n>. Files: Makefile, README.md. Validation: scaled to 2 replicas and verified both ingestor containers running via docker compose ps ingestor, then scaled back to 1. Rollback: run make scale-ingestor REPLICAS=1. |
 | P3-3 | 3 | Add DLQ/error policy | Copilot | DONE | 2026-03-20T04:32:35Z | 2026-03-20T04:46:49Z | Added DLX/DLQ policy on producer and consumer sides using dead-letter exchange and queue bindings with non-requeue nack behavior. Files: api/main.py, ingestor/main.py, docker-compose.yml, .env.example. Validation: API and ingestor tests passing (16 + 8). Rollback: remove DLX/DLQ env vars and queue arguments. |
-| P3-4 | 3 | Add throughput metrics/logging | Copilot | IN_PROGRESS | 2026-03-20T04:49:21Z |  |  |
-| P4-1 | 4 | Add graph tracing and node timings | TBD | TODO |  |  |  |
+| P3-4 | 3 | Add throughput metrics/logging | Copilot | DONE | 2026-03-20T04:49:21Z | 2026-03-20T04:58:11Z | Added throughput metrics instrumentation in ingestor: processed/success/failure counters, avg/max latency, and periodic window rate logs. Added METRICS_LOG_INTERVAL_SECONDS config plus docs. Added compatibility fallback for pre-existing queues lacking DLX args to keep worker healthy. Files: ingestor/main.py, ingestor/tests/test_ingestor.py, docker-compose.yml, .env.example, README.md, api/main.py. Validation: docker run API tests (16 passed), docker run ingestor tests (8 passed), runtime logs showed "Throughput metrics: processed_total=... window_rate_msgs_per_sec=..." after ingest traffic. Rollback: set METRICS_LOG_INTERVAL_SECONDS high or revert metrics helper; keep DLX fallback for legacy queues. |
+| P4-1 | 4 | Add graph tracing and node timings | Copilot | IN_PROGRESS | 2026-03-20T04:58:11Z |  |  |
 | P4-2 | 4 | Add prompt version strategy | TBD | TODO |  |  |  |
 | P4-3 | 4 | Optional OPM integration | TBD | TODO |  |  |  |
 | P5-1 | 5 | Run side-by-side validation | TBD | TODO |  |  |  |
@@ -182,6 +182,7 @@ Record meaningful plan-level decisions.
 - 2026-03-20: Completed Phase 2 query migration with LangGraph routing, LangChain retriever integration, synthesis output, and fallback controls.
 - 2026-03-20: Plan review reconciled tracker with implemented code; marked P3-1 and P3-3 completed based on validated changes.
 - 2026-03-20: Completed P3-2 with verified runtime worker scaling (2 replicas up/down) and documented operational command path.
+- 2026-03-20: Completed P3-4 by adding ingestor throughput metrics logs and queue compatibility fallback, then validated via tests and live log output.
 
 ## Working Rules
 - Do not remove fallback paths until post-cutover stability window is complete.
