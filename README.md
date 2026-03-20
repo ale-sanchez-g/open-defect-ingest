@@ -69,6 +69,7 @@ Navigate to **http://localhost:3000**
 
 ```
 GET  /health              — Health check
+GET  /config              — Runtime feature flags and migration config
 GET  /queue/stats         — RabbitMQ queue statistics
 POST /defects/ingest      — Publish a defect to the queue
 POST /defects/query       — Semantic similarity search
@@ -107,6 +108,30 @@ make test-api
   - Docker image: `chromadb/chroma:0.5.23`
   - Python package: `chromadb==0.5.23`
 
+### Migration flags and rollback
+
+Phase 0 introduces runtime flags for progressive LangGraph rollout:
+
+- `USE_LANGGRAPH_QUERY` (default: `false`)
+- `USE_LANGGRAPH_SUMMARY` (default: `false`)
+
+Current behavior remains legacy while these are `false`.
+
+Rollback procedure:
+
+1. Set both flags to `false` in `.env`.
+2. Restart API service:
+
+```bash
+docker compose up -d api
+```
+
+Verify active flag state:
+
+```bash
+curl http://localhost:8080/config
+```
+
 ### Local UI development
 
 ```bash
@@ -124,4 +149,5 @@ make down          — Stop all services
 make pull-models   — Pull Ollama models into a running stack
 make logs          — Follow logs for all services
 make test          — Run all Python unit tests
+make benchmark     — Run migration benchmark and write migration/baseline-latest.csv
 ```

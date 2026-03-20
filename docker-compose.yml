@@ -104,6 +104,8 @@ services:
       EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
       LLM_MODEL: ${LLM_MODEL:-llama3.2}
       QUEUE_NAME: ${QUEUE_NAME:-defects}
+      USE_LANGGRAPH_QUERY: ${USE_LANGGRAPH_QUERY:-false}
+      USE_LANGGRAPH_SUMMARY: ${USE_LANGGRAPH_SUMMARY:-false}
     restart: unless-stopped
 
   # ── Web UI ────────────────────────────────────────────────────────────────────

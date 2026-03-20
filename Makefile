@@ -1,4 +1,4 @@
-.PHONY: up down restart logs pull-models test-ingestor test-api
+.PHONY: up down restart logs pull-models test-ingestor test-api benchmark
 
 up:
 	docker compose up -d --build
@@ -25,3 +25,7 @@ test-api:
 	cd api && pip install -q -r requirements.txt && python -m pytest tests/ -v
 
 test: test-ingestor test-api
+
+benchmark:
+	bash migration/benchmark.sh > migration/baseline-latest.csv
+	@echo "Wrote migration/baseline-latest.csv"

@@ -32,6 +32,8 @@ EMBED_MODEL: str = os.getenv("EMBED_MODEL", "nomic-embed-text")
 LLM_MODEL: str = os.getenv("LLM_MODEL", "llama3.2")
 QUEUE_NAME: str = os.getenv("QUEUE_NAME", "defects")
 COLLECTION_NAME: str = "defects"
+USE_LANGGRAPH_QUERY: bool = os.getenv("USE_LANGGRAPH_QUERY", "false").lower() == "true"
+USE_LANGGRAPH_SUMMARY: bool = os.getenv("USE_LANGGRAPH_SUMMARY", "false").lower() == "true"
 
 # ── App ────────────────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -89,6 +91,17 @@ def _get_embedding(text: str) -> list[float]:
 @app.get("/health", tags=["System"])
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/config", tags=["System"])
+def config() -> dict[str, Any]:
+    """Return runtime feature-flag state for progressive migration rollout."""
+    return {
+        "features": {
+            "use_langgraph_query": USE_LANGGRAPH_QUERY,
+            "use_langgraph_summary": USE_LANGGRAPH_SUMMARY,
+        }
+    }
 
 
 @app.get("/queue/stats", tags=["Queue"])
