@@ -1,4 +1,4 @@
-.PHONY: up down restart logs pull-models test-ingestor test-api benchmark
+.PHONY: up down restart logs pull-models test-ingestor test-api benchmark scale-ingestor
 
 up:
 	docker compose up -d --build
@@ -29,3 +29,8 @@ test: test-ingestor test-api
 benchmark:
 	bash migration/benchmark.sh > migration/baseline-latest.csv
 	@echo "Wrote migration/baseline-latest.csv"
+
+scale-ingestor:
+	@if [ -z "$(REPLICAS)" ]; then echo "Usage: make scale-ingestor REPLICAS=2"; exit 1; fi
+	docker compose up -d --scale ingestor=$(REPLICAS)
+	@echo "Scaled ingestor service to $(REPLICAS) replica(s)"

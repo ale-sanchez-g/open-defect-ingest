@@ -128,19 +128,19 @@ Use this table to track execution state. Update after every completed step.
 | P0-3 | 0 | Define SLO targets | Copilot | DONE | 2026-03-20T04:19:16Z | 2026-03-20T04:19:36Z | Added explicit SLO target table for query latency, summary timeouts, summary completion p95, API availability, and ingest drain efficiency. File: migration/plan.md. Validation: targets align with captured baseline in migration/baseline.md. Rollback: adjust thresholds in this plan if hardware profile changes. |
 | P0-4 | 0 | Add rollback toggles and docs | Copilot | DONE | 2026-03-20T04:19:36Z | 2026-03-20T04:21:44Z | Documented rollback flags and runtime verification steps in README. Added /config endpoint and wired env flags via compose and .env.example. Files: README.md, api/main.py, docker-compose.yml, .env.example. Validation: docker compose up -d --build api and curl http://localhost:8080/config returned both flags as false. Rollback: keep both flags false. |
 | P1-1 | 1 | Add LangGraph/LangChain dependencies | Copilot | DONE | 2026-03-20T04:21:44Z | 2026-03-20T04:23:33Z | Added API dependencies for LangGraph/LangChain migration: langgraph, langchain, langchain-community, langchain-ollama. File: api/requirements.txt. Validation: docker compose build api completed successfully. Rollback: remove added dependencies and rebuild api image. |
-| P1-2 | 1 | Implement summary graph nodes | Copilot | IN_PROGRESS | 2026-03-20T04:23:33Z |  |  |
-| P1-3 | 1 | Add async summary job endpoints | TBD | TODO |  |  |  |
-| P1-4 | 1 | Add summary fallback flag | TBD | TODO |  |  |  |
-| P1-5 | 1 | Add summary tests | TBD | TODO |  |  |  |
-| P2-1 | 2 | Implement query graph and routing | TBD | TODO |  |  |  |
-| P2-2 | 2 | Integrate Chroma retriever via LangChain | TBD | TODO |  |  |  |
-| P2-3 | 2 | Add query synthesis node | TBD | TODO |  |  |  |
-| P2-4 | 2 | Add query fallback flag | TBD | TODO |  |  |  |
-| P2-5 | 2 | Add query tests and relevance checks | TBD | TODO |  |  |  |
-| P3-1 | 3 | Make prefetch_count configurable | TBD | TODO |  |  |  |
-| P3-2 | 3 | Enable worker horizontal scaling | TBD | TODO |  |  |  |
-| P3-3 | 3 | Add DLQ/error policy | TBD | TODO |  |  |  |
-| P3-4 | 3 | Add throughput metrics/logging | TBD | TODO |  |  |  |
+| P1-2 | 1 | Implement summary graph nodes | Copilot | DONE | 2026-03-20T04:23:33Z | 2026-03-20T04:28:55Z | Added LangGraph summary workflow nodes: select_documents, analyze_patterns, analyze_severity, analyze_critical_areas, synthesize. Files: api/main.py. Validation: docker-run pytest passed including langgraph summary route test. Rollback: set USE_LANGGRAPH_SUMMARY=false to keep legacy summary path. |
+| P1-3 | 1 | Add async summary job endpoints | Copilot | DONE | 2026-03-20T04:28:55Z | 2026-03-20T04:28:55Z | Added async summary job endpoints POST /defects/summary/jobs, GET /defects/summary/jobs/{job_id}, GET /defects/summary/jobs/{job_id}/result with in-memory job state and worker thread. Files: api/main.py. Validation: docker-run pytest passed job lifecycle tests. Rollback: avoid calling job endpoints and keep legacy /defects/summary path active. |
+| P1-4 | 1 | Add summary fallback flag | Copilot | DONE | 2026-03-20T04:28:55Z | 2026-03-20T04:28:55Z | Wired USE_LANGGRAPH_SUMMARY flag into /defects/summary execution path so legacy and graph paths can be switched via env. File: api/main.py. Validation: unit test covers graph path when flag is enabled. Rollback: set USE_LANGGRAPH_SUMMARY=false. |
+| P1-5 | 1 | Add summary tests | Copilot | DONE | 2026-03-20T04:28:55Z | 2026-03-20T04:28:55Z | Added tests for /config flags, langgraph summary selection, async summary job status/result, and unknown job handling. File: api/tests/test_api.py. Validation: docker run ... pytest tests/test_api.py -q -> 15 passed. Rollback: revert added tests only if endpoint contract intentionally changes. |
+| P2-1 | 2 | Implement query graph and routing | Copilot | DONE | 2026-03-20T04:28:55Z | 2026-03-20T04:32:35Z | Added QueryState and LangGraph query flow with route, retrieve, synthesize nodes. File: api/main.py. Validation: API tests pass in docker-run suite. Rollback: set USE_LANGGRAPH_QUERY=false. |
+| P2-2 | 2 | Integrate Chroma retriever via LangChain | Copilot | DONE | 2026-03-20T04:32:35Z | 2026-03-20T04:32:35Z | Added LangChain Chroma retriever integration using OllamaEmbeddings and HttpClient-backed collection access. File: api/main.py. Validation: query graph path test passes and legacy path preserved. Rollback: use legacy query path via feature flag. |
+| P2-3 | 2 | Add query synthesis node | Copilot | DONE | 2026-03-20T04:32:35Z | 2026-03-20T04:32:35Z | Added query synthesis node producing concise analysis from retrieved defects. File: api/main.py. Validation: tests assert analysis/route fields on graph-enabled query path. Rollback: disable graph query flag. |
+| P2-4 | 2 | Add query fallback flag | Copilot | DONE | 2026-03-20T04:32:35Z | 2026-03-20T04:32:35Z | Wired USE_LANGGRAPH_QUERY into /defects/query to switch between graph and legacy implementations without API break. File: api/main.py. Validation: legacy query tests continue passing. Rollback: keep flag false. |
+| P2-5 | 2 | Add query tests and relevance checks | Copilot | DONE | 2026-03-20T04:32:35Z | 2026-03-20T04:32:35Z | Added test coverage for graph-enabled query route/analysis payload and kept existing query behavior tests. File: api/tests/test_api.py. Validation: docker run ... pytest tests/test_api.py -q -> 16 passed. Rollback: adjust tests if response contract changes intentionally. |
+| P3-1 | 3 | Make prefetch_count configurable | Copilot | DONE | 2026-03-20T04:32:35Z | 2026-03-20T04:46:49Z | Added configurable PREFETCH_COUNT in ingestor and compose/env wiring. Files: ingestor/main.py, docker-compose.yml, .env.example, ingestor/tests/test_ingestor.py. Validation: docker run --rm -v "$PWD/ingestor:/work" -w /work python:3.12-slim sh -lc "pip install -q -r requirements.txt && pytest tests/test_ingestor.py -q" -> 8 passed. Rollback: set PREFETCH_COUNT=1. |
+| P3-2 | 3 | Enable worker horizontal scaling | Copilot | DONE | 2026-03-20T04:46:49Z | 2026-03-20T04:49:21Z | Added and documented horizontal scaling workflow for ingestor workers via make scale-ingestor REPLICAS=<n>. Files: Makefile, README.md. Validation: scaled to 2 replicas and verified both ingestor containers running via docker compose ps ingestor, then scaled back to 1. Rollback: run make scale-ingestor REPLICAS=1. |
+| P3-3 | 3 | Add DLQ/error policy | Copilot | DONE | 2026-03-20T04:32:35Z | 2026-03-20T04:46:49Z | Added DLX/DLQ policy on producer and consumer sides using dead-letter exchange and queue bindings with non-requeue nack behavior. Files: api/main.py, ingestor/main.py, docker-compose.yml, .env.example. Validation: API and ingestor tests passing (16 + 8). Rollback: remove DLX/DLQ env vars and queue arguments. |
+| P3-4 | 3 | Add throughput metrics/logging | Copilot | IN_PROGRESS | 2026-03-20T04:49:21Z |  |  |
 | P4-1 | 4 | Add graph tracing and node timings | TBD | TODO |  |  |  |
 | P4-2 | 4 | Add prompt version strategy | TBD | TODO |  |  |  |
 | P4-3 | 4 | Optional OPM integration | TBD | TODO |  |  |  |
@@ -178,6 +178,10 @@ Record meaningful plan-level decisions.
 - 2026-03-20: Added quantitative SLO targets to gate migration phases with objective pass/fail criteria.
 - 2026-03-20: Added rollback docs and runtime config validation for migration feature flags.
 - 2026-03-20: Phase 1 started with LangGraph/LangChain dependencies added and build-validated.
+- 2026-03-20: Implemented LangGraph-based summary workflow, async summary jobs, fallback flag routing, and expanded summary test coverage.
+- 2026-03-20: Completed Phase 2 query migration with LangGraph routing, LangChain retriever integration, synthesis output, and fallback controls.
+- 2026-03-20: Plan review reconciled tracker with implemented code; marked P3-1 and P3-3 completed based on validated changes.
+- 2026-03-20: Completed P3-2 with verified runtime worker scaling (2 replicas up/down) and documented operational command path.
 
 ## Working Rules
 - Do not remove fallback paths until post-cutover stability window is complete.

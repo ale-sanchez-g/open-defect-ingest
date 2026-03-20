@@ -23,6 +23,16 @@ def test_health():
     assert resp.json() == {"status": "ok"}
 
 
+def test_config_reports_feature_flags():
+    with patch("main.USE_LANGGRAPH_QUERY", False), patch("main.USE_LANGGRAPH_SUMMARY", True):
+        resp = client.get("/config")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["features"]["use_langgraph_query"] is False
+    assert data["features"]["use_langgraph_summary"] is True
+
+
 # ── /queue/stats ──────────────────────────────────────────────────────────────
 
 
@@ -146,6 +156,25 @@ def test_query_defects_empty_collection():
     assert resp.json()["results"] == []
 
 
+def test_query_uses_langgraph_when_flag_enabled():
+    graph_payload = {
+        "query": "login issues",
+        "results": [{"id": "id-1", "document": "doc", "metadata": {"title": "Bug"}, "distance": None}],
+        "route": "semantic_search",
+        "analysis": "Likely auth-session defects.",
+    }
+    with patch("main.USE_LANGGRAPH_QUERY", True), patch(
+        "main._run_langgraph_query", return_value=graph_payload
+    ):
+        resp = client.post("/defects/query", json={"query": "login issues", "n_results": 1})
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["route"] == "semantic_search"
+    assert data["analysis"]
+    assert data["results"][0]["id"] == "id-1"
+
+
 # ── /defects/summary ─────────────────────────────────────────────────────────
 
 
@@ -184,6 +213,60 @@ def test_summary_calls_llm_and_returns_text():
     data = resp.json()
     assert data["total"] == 3
     assert "memory leaks" in data["summary"].lower()
+
+
+def test_summary_uses_langgraph_when_flag_enabled():
+    mock_collection = MagicMock()
+    mock_collection.count.return_value = 2
+
+    with patch("main.USE_LANGGRAPH_SUMMARY", True), patch(
+        "main.chromadb.HttpClient"
+    ) as mock_client, patch("main._run_langgraph_summary", return_value="Graph summary output"):
+        mock_client.return_value.get_or_create_collection.return_value = mock_collection
+        resp = client.get("/defects/summary")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total"] == 2
+    assert data["summary"] == "Graph summary output"
+
+
+class _ImmediateThread:
+    def __init__(self, target, args=(), daemon=None):
+        self._target = target
+        self._args = args
+
+    def start(self):
+        self._target(*self._args)
+
+
+def test_summary_job_endpoints_complete_and_return_result():
+    mock_collection = MagicMock()
+    mock_collection.count.return_value = 2
+
+    with patch("main.threading.Thread", _ImmediateThread), patch(
+        "main.chromadb.HttpClient"
+    ) as mock_client, patch("main._run_langgraph_summary", return_value="Async graph summary"):
+        mock_client.return_value.get_or_create_collection.return_value = mock_collection
+        created = client.post("/defects/summary/jobs")
+
+    assert created.status_code == 200
+    job_id = created.json()["job_id"]
+
+    status_resp = client.get(f"/defects/summary/jobs/{job_id}")
+    assert status_resp.status_code == 200
+    assert status_resp.json()["status"] == "completed"
+
+    result_resp = client.get(f"/defects/summary/jobs/{job_id}/result")
+    assert result_resp.status_code == 200
+    result_data = result_resp.json()
+    assert result_data["status"] == "completed"
+    assert result_data["result"]["summary"] == "Async graph summary"
+
+
+def test_summary_job_status_404_for_unknown_job():
+    resp = client.get("/defects/summary/jobs/does-not-exist")
+    assert resp.status_code == 404
 
 
 # ── /defects/list ─────────────────────────────────────────────────────────────

@@ -81,6 +81,10 @@ services:
       OLLAMA_HOST: http://ollama:11434
       EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
       QUEUE_NAME: ${QUEUE_NAME:-defects}
+      PREFETCH_COUNT: ${PREFETCH_COUNT:-1}
+      METRICS_LOG_INTERVAL_SECONDS: ${METRICS_LOG_INTERVAL_SECONDS:-30}
+      DLX_EXCHANGE: ${DLX_EXCHANGE:-defects.dlx}
+      DLQ_NAME: ${DLQ_NAME:-defects.dlq}
     restart: unless-stopped
 
   # ── REST API ─────────────────────────────────────────────────────────────────
@@ -104,6 +108,8 @@ services:
       EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
       LLM_MODEL: ${LLM_MODEL:-llama3.2}
       QUEUE_NAME: ${QUEUE_NAME:-defects}
+      DLX_EXCHANGE: ${DLX_EXCHANGE:-defects.dlx}
+      DLQ_NAME: ${DLQ_NAME:-defects.dlq}
       USE_LANGGRAPH_QUERY: ${USE_LANGGRAPH_QUERY:-false}
       USE_LANGGRAPH_SUMMARY: ${USE_LANGGRAPH_SUMMARY:-false}
     restart: unless-stopped

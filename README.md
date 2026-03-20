@@ -74,8 +74,16 @@ GET  /queue/stats         — RabbitMQ queue statistics
 POST /defects/ingest      — Publish a defect to the queue
 POST /defects/query       — Semantic similarity search
 GET  /defects/summary     — AI-generated summary (via Ollama)
+POST /defects/summary/jobs             — Start async summary job
+GET  /defects/summary/jobs/{job_id}    — Summary job status
+GET  /defects/summary/jobs/{job_id}/result — Summary job result
 GET  /defects/list        — Paginated list of all defects
 ```
+
+When `USE_LANGGRAPH_QUERY=true`, `/defects/query` includes additional fields:
+
+- `route` — query workflow route selected by graph router
+- `analysis` — concise synthesized guidance from retrieved results
 
 ## Defect Schema
 
@@ -132,6 +140,34 @@ Verify active flag state:
 curl http://localhost:8080/config
 ```
 
+### Horizontal scaling for ingestor workers
+
+Scale ingest workers horizontally to increase queue drain throughput:
+
+```bash
+make scale-ingestor REPLICAS=2
+```
+
+You can scale up or down at runtime without changing application code.
+
+Verify active worker replicas:
+
+```bash
+docker compose ps ingestor
+```
+
+The ingestor emits periodic throughput logs with:
+
+- processed/success/failure totals
+- average and max processing latency
+- window message rate (messages/sec)
+
+Tune log cadence with:
+
+```dotenv
+METRICS_LOG_INTERVAL_SECONDS=30
+```
+
 ### Local UI development
 
 ```bash
@@ -150,4 +186,5 @@ make pull-models   — Pull Ollama models into a running stack
 make logs          — Follow logs for all services
 make test          — Run all Python unit tests
 make benchmark     — Run migration benchmark and write migration/baseline-latest.csv
+make scale-ingestor REPLICAS=2 — Scale ingestor workers horizontally
 ```

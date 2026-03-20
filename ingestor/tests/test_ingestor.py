@@ -10,7 +10,7 @@ import pytest
 # Allow importing main.py from the parent directory
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from main import get_embedding, process_message, store_defect  # noqa: E402
+from main import get_embedding, process_message, start_consumer, store_defect  # noqa: E402
 
 
 # ── get_embedding ─────────────────────────────────────────────────────────────
@@ -107,10 +107,14 @@ def test_process_message_success():
     }
     ch, method, props = _make_mq_mocks()
 
-    with patch("main.store_defect") as mock_store:
+    with patch("main.store_defect") as mock_store, patch(
+        "main._record_processing_metrics"
+    ) as mock_metrics:
         process_message(ch, method, props, json.dumps(defect).encode())
 
     mock_store.assert_called_once_with(defect)
+    mock_metrics.assert_called_once()
+    assert mock_metrics.call_args.kwargs["success"] is True
     ch.basic_ack.assert_called_once_with(delivery_tag=42)
     ch.basic_nack.assert_not_called()
 
@@ -118,8 +122,11 @@ def test_process_message_success():
 def test_process_message_nacks_on_invalid_json():
     ch, method, props = _make_mq_mocks()
 
-    process_message(ch, method, props, b"not { valid json }")
+    with patch("main._record_processing_metrics") as mock_metrics:
+        process_message(ch, method, props, b"not { valid json }")
 
+    mock_metrics.assert_called_once()
+    assert mock_metrics.call_args.kwargs["success"] is False
     ch.basic_nack.assert_called_once_with(delivery_tag=42, requeue=False)
     ch.basic_ack.assert_not_called()
 
@@ -133,3 +140,18 @@ def test_process_message_nacks_on_store_failure():
 
     ch.basic_nack.assert_called_once_with(delivery_tag=42, requeue=False)
     ch.basic_ack.assert_not_called()
+
+
+def test_start_consumer_uses_configured_prefetch_count():
+    mock_channel = MagicMock()
+    mock_connection = MagicMock()
+    mock_connection.channel.return_value = mock_channel
+
+    with patch("main.pika.URLParameters", return_value=MagicMock()), patch(
+        "main.pika.BlockingConnection", return_value=mock_connection
+    ):
+        start_consumer(rabbitmq_url="amqp://guest:guest@localhost:5672/", queue_name="defects", prefetch_count=7)
+
+    mock_channel.basic_qos.assert_called_once_with(prefetch_count=7)
+    mock_channel.basic_consume.assert_called_once()
+    mock_channel.start_consuming.assert_called_once()
