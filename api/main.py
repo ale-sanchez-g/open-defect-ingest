@@ -18,6 +18,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, TypedDict
+from urllib.parse import urlparse, urlunparse
 
 import chromadb
 import pika
@@ -48,12 +49,16 @@ DLQ_NAME: str = os.getenv("DLQ_NAME", f"{QUEUE_NAME}.dlq")
 GRAPH_TRACE_ENABLED: bool = os.getenv("GRAPH_TRACE_ENABLED", "true").lower() == "true"
 PROMPT_STRATEGY: str = os.getenv("PROMPT_STRATEGY", "local_versioned")
 PROMPTS_DIR: str = os.getenv("PROMPTS_DIR", "/app/prompts")
+OPM_BASE_URL: str = os.getenv("OPM_BASE_URL", "")
+OPM_TIMEOUT_SECONDS: int = int(os.getenv("OPM_TIMEOUT_SECONDS", "5"))
 
 SUMMARY_JOBS: dict[str, dict[str, Any]] = {}
 SUMMARY_JOBS_LOCK = threading.Lock()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 PROMPT_VERSION: str = "inline-defaults"
+PROMPT_SOURCE: str = "inline-defaults"
+OPM_PROMPT_NAMES: dict[str, str] = {}
 DEFAULT_PROMPTS: dict[str, str] = {
     "legacy_summary": (
         "You are a software quality engineer. Analyze the following list of software defects "
@@ -226,9 +231,7 @@ def _trace_node(node_name: str, fn: Any) -> Any:
 
 def _load_versioned_prompts() -> None:
     """Load versioned prompts from local files if available."""
-    global PROMPT_VERSION
-    if PROMPT_STRATEGY != "local_versioned":
-        return
+    global PROMPT_VERSION, PROMPT_SOURCE, OPM_PROMPT_NAMES
 
     metadata_path = Path(PROMPTS_DIR) / "prompt-metadata.json"
     if not metadata_path.exists():
@@ -237,6 +240,7 @@ def _load_versioned_prompts() -> None:
 
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        OPM_PROMPT_NAMES = dict(metadata.get("opm_names", {}))
         prompt_files = metadata.get("prompts", {})
         loaded_prompts: dict[str, str] = {}
         for key, rel_path in prompt_files.items():
@@ -247,6 +251,7 @@ def _load_versioned_prompts() -> None:
             PROMPTS[key] = value
 
         PROMPT_VERSION = str(metadata.get("version", "local-unknown"))
+        PROMPT_SOURCE = "local"
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to load versioned prompts: %s. Using inline defaults.", exc)
 
@@ -259,7 +264,133 @@ def _render_prompt(prompt_key: str, **kwargs: Any) -> str:
     return rendered
 
 
+def _extract_prompt_content(payload: dict[str, Any]) -> str:
+    """Extract prompt text from OPM payload using tolerant key lookup."""
+    for key in ("content", "template", "prompt", "body"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
+def _normalize_opm_api_base_url(raw_base_url: str) -> str:
+    """Normalize OPM base URL so docs/UI URLs resolve to API root."""
+    base_url = raw_base_url.strip().rstrip("/")
+    parsed = urlparse(base_url)
+    path = parsed.path or ""
+
+    # Accept docs/redoc URLs and map them back to the API root.
+    for suffix in ("/docs", "/redoc", "/swagger"):
+        if path.endswith(suffix):
+            path = path[: -len(suffix)]
+            break
+
+    path = path.rstrip("/")
+    if path.endswith("/api"):
+        normalized_path = path
+    elif path == "":
+        normalized_path = "/api"
+    else:
+        normalized_path = f"{path}/api"
+
+    return urlunparse((parsed.scheme, parsed.netloc, normalized_path, "", "", ""))
+
+
+def _opm_api_candidates(raw_base_url: str) -> list[str]:
+    """Build candidate OPM API base URLs with Docker localhost fallback."""
+    primary = _normalize_opm_api_base_url(raw_base_url)
+    candidates = [primary]
+
+    parsed = urlparse(primary)
+    if parsed.hostname in {"localhost", "127.0.0.1"}:
+        netloc = parsed.netloc
+        if "@" in netloc:
+            auth, host_port = netloc.rsplit("@", 1)
+            if ":" in host_port:
+                _, port = host_port.split(":", 1)
+                host_port = f"host.docker.internal:{port}"
+            else:
+                host_port = "host.docker.internal"
+            fallback_netloc = f"{auth}@{host_port}"
+        else:
+            if ":" in netloc:
+                _, port = netloc.split(":", 1)
+                fallback_netloc = f"host.docker.internal:{port}"
+            else:
+                fallback_netloc = "host.docker.internal"
+
+        fallback = urlunparse((parsed.scheme, fallback_netloc, parsed.path, "", "", ""))
+        if fallback not in candidates:
+            candidates.append(fallback)
+
+    return candidates
+
+
+def _load_prompts_from_opm_with_fallback() -> None:
+    """Load prompt templates from OPM by name, falling back to local prompts on failures."""
+    global PROMPT_SOURCE, PROMPT_VERSION
+    if PROMPT_STRATEGY != "opm_with_fallback":
+        return
+    if not OPM_BASE_URL:
+        logger.warning("PROMPT_STRATEGY=opm_with_fallback but OPM_BASE_URL is not configured; using local prompts")
+        return
+
+    candidates = _opm_api_candidates(OPM_BASE_URL)
+    last_error: str = ""
+    for base_url in candidates:
+        try:
+            list_resp = requests.get(f"{base_url}/prompts/", timeout=OPM_TIMEOUT_SECONDS)
+            list_resp.raise_for_status()
+            items = list_resp.json()
+            if not isinstance(items, list):
+                logger.warning("Unexpected OPM prompt list response from %s; trying next candidate", base_url)
+                continue
+
+            by_name = {str(item.get("name", "")).strip().lower(): item for item in items}
+            applied = 0
+            versions: list[str] = []
+            for key, opm_name in OPM_PROMPT_NAMES.items():
+                entry = by_name.get(opm_name.lower())
+                if not entry:
+                    continue
+
+                prompt_id = entry.get("id")
+                if not prompt_id:
+                    continue
+
+                detail_resp = requests.get(
+                    f"{base_url}/prompts/{prompt_id}",
+                    timeout=OPM_TIMEOUT_SECONDS,
+                )
+                detail_resp.raise_for_status()
+                payload = detail_resp.json()
+                content = _extract_prompt_content(payload if isinstance(payload, dict) else {})
+                if not content:
+                    continue
+
+                PROMPTS[key] = content.strip()
+                applied += 1
+                versions.append(str(entry.get("version", "unknown")))
+
+            if applied > 0:
+                PROMPT_SOURCE = "opm"
+                PROMPT_VERSION = f"opm:{','.join(sorted(set(versions)))}"
+                logger.info("Loaded %s prompt(s) from OPM endpoint %s", applied, base_url)
+                return
+
+            logger.warning("No OPM prompts were applied from %s; trying next candidate", base_url)
+        except Exception as exc:  # noqa: BLE001
+            last_error = str(exc)
+            logger.warning("Failed to load prompts from OPM endpoint %s: %s", base_url, exc)
+
+    if last_error:
+        logger.warning("All OPM prompt loading attempts failed. Using local prompts. Last error: %s", last_error)
+    else:
+        logger.warning("All OPM prompt loading attempts yielded no prompt updates. Using local prompts.")
+
+
 _load_versioned_prompts()
+_load_prompts_from_opm_with_fallback()
 
 
 def _query_route_node(state: QueryState) -> QueryState:
@@ -532,6 +663,7 @@ def config() -> dict[str, Any]:
         "prompts": {
             "strategy": PROMPT_STRATEGY,
             "version": PROMPT_VERSION,
+            "source": PROMPT_SOURCE,
         },
     }
 

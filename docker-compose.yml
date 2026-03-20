@@ -115,6 +115,8 @@ services:
       GRAPH_TRACE_ENABLED: ${GRAPH_TRACE_ENABLED:-true}
       PROMPT_STRATEGY: ${PROMPT_STRATEGY:-local_versioned}
       PROMPTS_DIR: ${PROMPTS_DIR:-/app/prompts}
+      OPM_BASE_URL: ${OPM_BASE_URL:-}
+      OPM_TIMEOUT_SECONDS: ${OPM_TIMEOUT_SECONDS:-5}
     restart: unless-stopped
 
   # ── Web UI ────────────────────────────────────────────────────────────────────

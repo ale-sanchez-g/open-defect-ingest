@@ -26,7 +26,9 @@ def test_health():
 def test_config_reports_feature_flags():
     with patch("main.USE_LANGGRAPH_QUERY", False), patch("main.USE_LANGGRAPH_SUMMARY", True), patch(
         "main.GRAPH_TRACE_ENABLED", True
-    ), patch("main.PROMPT_STRATEGY", "local_versioned"), patch("main.PROMPT_VERSION", "1.0.0"):
+    ), patch("main.PROMPT_STRATEGY", "local_versioned"), patch("main.PROMPT_VERSION", "1.0.0"), patch(
+        "main.PROMPT_SOURCE", "local"
+    ):
         resp = client.get("/config")
 
     assert resp.status_code == 200
@@ -36,6 +38,7 @@ def test_config_reports_feature_flags():
     assert data["features"]["graph_trace_enabled"] is True
     assert data["prompts"]["strategy"] == "local_versioned"
     assert data["prompts"]["version"] == "1.0.0"
+    assert data["prompts"]["source"] == "local"
 
 
 def test_trace_node_records_timing_and_trace_event():
@@ -60,6 +63,21 @@ def test_render_prompt_injects_variables():
         rendered = _render_prompt("query_synthesis", route="risk_focus", query="payment failed")
 
     assert rendered == "route=risk_focus query=payment failed"
+
+
+def test_normalize_opm_docs_url_to_api_root():
+    from main import _normalize_opm_api_base_url
+
+    assert _normalize_opm_api_base_url("http://localhost:8001/api/docs") == "http://localhost:8001/api"
+    assert _normalize_opm_api_base_url("http://localhost:8001") == "http://localhost:8001/api"
+
+
+def test_opm_candidates_include_docker_host_for_localhost():
+    from main import _opm_api_candidates
+
+    candidates = _opm_api_candidates("http://localhost:8001/api/docs")
+    assert "http://localhost:8001/api" in candidates
+    assert "http://host.docker.internal:8001/api" in candidates
 
 
 # ── /queue/stats ──────────────────────────────────────────────────────────────

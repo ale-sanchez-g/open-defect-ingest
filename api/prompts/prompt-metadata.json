@@ -1,5 +1,13 @@
 {
   "version": "1.0.0",
+  "opm_names": {
+    "legacy_summary": "defect-ingest-legacy-summary",
+    "query_synthesis": "defect-ingest-query-synthesis",
+    "summary_analyze_patterns": "defect-ingest-summary-analyze-patterns",
+    "summary_analyze_severity": "defect-ingest-summary-analyze-severity",
+    "summary_analyze_critical_areas": "defect-ingest-summary-analyze-critical-areas",
+    "summary_synthesize": "defect-ingest-summary-synthesize"
+  },
   "prompts": {
     "legacy_summary": "legacy-summary.txt",
     "query_synthesis": "query-synthesis.txt",
