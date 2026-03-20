@@ -10,10 +10,13 @@ Provides endpoints for:
 """
 
 import json
+import logging
 import os
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional, TypedDict
 
 import chromadb
@@ -42,9 +45,56 @@ USE_LANGGRAPH_SUMMARY: bool = os.getenv("USE_LANGGRAPH_SUMMARY", "false").lower(
 SUMMARY_JOB_TIMEOUT_SECONDS: int = int(os.getenv("SUMMARY_JOB_TIMEOUT_SECONDS", "180"))
 DLX_EXCHANGE: str = os.getenv("DLX_EXCHANGE", f"{QUEUE_NAME}.dlx")
 DLQ_NAME: str = os.getenv("DLQ_NAME", f"{QUEUE_NAME}.dlq")
+GRAPH_TRACE_ENABLED: bool = os.getenv("GRAPH_TRACE_ENABLED", "true").lower() == "true"
+PROMPT_STRATEGY: str = os.getenv("PROMPT_STRATEGY", "local_versioned")
+PROMPTS_DIR: str = os.getenv("PROMPTS_DIR", "/app/prompts")
 
 SUMMARY_JOBS: dict[str, dict[str, Any]] = {}
 SUMMARY_JOBS_LOCK = threading.Lock()
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+PROMPT_VERSION: str = "inline-defaults"
+DEFAULT_PROMPTS: dict[str, str] = {
+    "legacy_summary": (
+        "You are a software quality engineer. Analyze the following list of software defects "
+        "and provide:\n"
+        "1. A brief overall summary of the main issues.\n"
+        "2. Common patterns or recurring problems across different defects.\n"
+        "3. The most critical areas that need attention.\n\n"
+        "Defects:\n{context}\n\n"
+        "Provide a concise, actionable analysis."
+    ),
+    "query_synthesis": (
+        "You are a software quality engineer. Summarize the likely issue cluster from the retrieved defects "
+        "and provide one immediate next action. Keep it under 100 words.\n\n"
+        "Query route: {route}\n"
+        "User query: {query}\n"
+        "Retrieved defects:\n{context}"
+    ),
+    "summary_analyze_patterns": (
+        "You are a software quality engineer. Identify recurring defect patterns and likely root causes. "
+        "Return concise bullets.\n\n"
+        "Defects:\n{context}"
+    ),
+    "summary_analyze_severity": (
+        "You are a software quality engineer. Assess defect severity trends and risk concentration. "
+        "Return concise bullets with priority guidance.\n\n"
+        "Defects:\n{context}"
+    ),
+    "summary_analyze_critical_areas": (
+        "You are a software quality engineer. Identify critical components and areas needing immediate action. "
+        "Return concise bullets.\n\n"
+        "Defects:\n{context}"
+    ),
+    "summary_synthesize": (
+        "You are a software quality engineer. Synthesize the following analysis into a concise actionable report "
+        "with sections: Overview, Recurring Patterns, Severity Trends, Critical Areas, and Next Actions.\n\n"
+        "Patterns:\n{patterns}\n\n"
+        "Severity:\n{severity}\n\n"
+        "Critical Areas:\n{critical_areas}\n"
+    ),
+}
+PROMPTS: dict[str, str] = dict(DEFAULT_PROMPTS)
 
 # ── App ────────────────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -85,6 +135,9 @@ class SummaryState(TypedDict):
     severity: str
     critical_areas: str
     summary: str
+    trace_id: str
+    node_timings_ms: dict[str, float]
+    trace_events: list[dict[str, Any]]
 
 
 class QueryState(TypedDict):
@@ -93,6 +146,9 @@ class QueryState(TypedDict):
     route: str
     results: list[dict[str, Any]]
     analysis: str
+    trace_id: str
+    node_timings_ms: dict[str, float]
+    trace_events: list[dict[str, Any]]
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -122,6 +178,88 @@ def _langchain_retriever(k: int) -> Any:
         embedding_function=embeddings,
     )
     return vector_store.as_retriever(search_kwargs={"k": k})
+
+
+def _trace_node(node_name: str, fn: Any) -> Any:
+    """Wrap a graph node to emit lightweight trace events and per-node timings."""
+
+    def _wrapped(state: dict[str, Any]) -> dict[str, Any]:
+        trace_id = state.get("trace_id") or str(uuid.uuid4())
+        started_at = time.monotonic()
+        try:
+            updates = fn(state) or {}
+        except Exception as exc:  # noqa: BLE001
+            elapsed_ms = round((time.monotonic() - started_at) * 1000, 3)
+            logger.error(
+                "Graph trace id=%s node=%s status=error elapsed_ms=%.3f error=%s",
+                trace_id,
+                node_name,
+                elapsed_ms,
+                exc,
+            )
+            raise
+
+        elapsed_ms = round((time.monotonic() - started_at) * 1000, 3)
+
+        node_timings = dict(state.get("node_timings_ms") or {})
+        node_timings[node_name] = elapsed_ms
+
+        trace_events = list(state.get("trace_events") or [])
+        trace_events.append(
+            {
+                "node": node_name,
+                "elapsed_ms": elapsed_ms,
+                "at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+        if GRAPH_TRACE_ENABLED:
+            logger.info("Graph trace id=%s node=%s status=ok elapsed_ms=%.3f", trace_id, node_name, elapsed_ms)
+
+        updates["trace_id"] = trace_id
+        updates["node_timings_ms"] = node_timings
+        updates["trace_events"] = trace_events
+        return updates
+
+    return _wrapped
+
+
+def _load_versioned_prompts() -> None:
+    """Load versioned prompts from local files if available."""
+    global PROMPT_VERSION
+    if PROMPT_STRATEGY != "local_versioned":
+        return
+
+    metadata_path = Path(PROMPTS_DIR) / "prompt-metadata.json"
+    if not metadata_path.exists():
+        logger.warning("Prompt metadata file not found at %s; using inline defaults", metadata_path)
+        return
+
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        prompt_files = metadata.get("prompts", {})
+        loaded_prompts: dict[str, str] = {}
+        for key, rel_path in prompt_files.items():
+            prompt_path = Path(PROMPTS_DIR) / rel_path
+            loaded_prompts[key] = prompt_path.read_text(encoding="utf-8").strip()
+
+        for key, value in loaded_prompts.items():
+            PROMPTS[key] = value
+
+        PROMPT_VERSION = str(metadata.get("version", "local-unknown"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to load versioned prompts: %s. Using inline defaults.", exc)
+
+
+def _render_prompt(prompt_key: str, **kwargs: Any) -> str:
+    template = PROMPTS.get(prompt_key, DEFAULT_PROMPTS[prompt_key])
+    rendered = template
+    for key, value in kwargs.items():
+        rendered = rendered.replace("{" + key + "}", str(value))
+    return rendered
+
+
+_load_versioned_prompts()
 
 
 def _query_route_node(state: QueryState) -> QueryState:
@@ -163,21 +301,20 @@ def _query_synthesize_node(state: QueryState) -> QueryState:
             for item in state["results"][:5]
         ]
     )
-    prompt = (
-        "You are a software quality engineer. Summarize the likely issue cluster from the retrieved defects "
-        "and provide one immediate next action. Keep it under 100 words.\n\n"
-        f"Query route: {state.get('route', 'semantic_search')}\n"
-        f"User query: {state['query']}\n"
-        f"Retrieved defects:\n{context}"
+    prompt = _render_prompt(
+        "query_synthesis",
+        route=state.get("route", "semantic_search"),
+        query=state["query"],
+        context=context,
     )
     return {"analysis": _ollama_generate(prompt, timeout=45)}
 
 
 def _build_query_graph() -> Any:
     graph = StateGraph(QueryState)
-    graph.add_node("route_node", _query_route_node)
-    graph.add_node("retrieve_node", _query_retrieve_node)
-    graph.add_node("synthesize_node", _query_synthesize_node)
+    graph.add_node("route_node", _trace_node("query.route", _query_route_node))
+    graph.add_node("retrieve_node", _trace_node("query.retrieve", _query_retrieve_node))
+    graph.add_node("synthesize_node", _trace_node("query.synthesize", _query_synthesize_node))
 
     graph.add_edge(START, "route_node")
     graph.add_edge("route_node", "retrieve_node")
@@ -218,6 +355,9 @@ def _run_langgraph_query(query: str, n_results: int) -> dict[str, Any]:
             "route": "",
             "results": [],
             "analysis": "",
+            "trace_id": "",
+            "node_timings_ms": {},
+            "trace_events": [],
         }
     )
     return {
@@ -225,6 +365,8 @@ def _run_langgraph_query(query: str, n_results: int) -> dict[str, Any]:
         "results": result.get("results", []),
         "route": result.get("route", "semantic_search"),
         "analysis": result.get("analysis", ""),
+        "trace_id": result.get("trace_id", ""),
+        "node_timings_ms": result.get("node_timings_ms", {}),
     }
 
 
@@ -245,52 +387,39 @@ def _summary_select_documents(state: SummaryState) -> SummaryState:
 
 def _summary_analyze_patterns(state: SummaryState) -> SummaryState:
     context = "\n".join(state.get("selected_documents", []))
-    prompt = (
-        "You are a software quality engineer. Identify recurring defect patterns and likely root causes. "
-        "Return concise bullets.\n\n"
-        f"Defects:\n{context}"
-    )
+    prompt = _render_prompt("summary_analyze_patterns", context=context)
     return {"patterns": _ollama_generate(prompt)}
 
 
 def _summary_analyze_severity(state: SummaryState) -> SummaryState:
     context = "\n".join(state.get("selected_documents", []))
-    prompt = (
-        "You are a software quality engineer. Assess defect severity trends and risk concentration. "
-        "Return concise bullets with priority guidance.\n\n"
-        f"Defects:\n{context}"
-    )
+    prompt = _render_prompt("summary_analyze_severity", context=context)
     return {"severity": _ollama_generate(prompt)}
 
 
 def _summary_analyze_critical_areas(state: SummaryState) -> SummaryState:
     context = "\n".join(state.get("selected_documents", []))
-    prompt = (
-        "You are a software quality engineer. Identify critical components and areas needing immediate action. "
-        "Return concise bullets.\n\n"
-        f"Defects:\n{context}"
-    )
+    prompt = _render_prompt("summary_analyze_critical_areas", context=context)
     return {"critical_areas": _ollama_generate(prompt)}
 
 
 def _summary_synthesize(state: SummaryState) -> SummaryState:
-    prompt = (
-        "You are a software quality engineer. Synthesize the following analysis into a concise actionable report "
-        "with sections: Overview, Recurring Patterns, Severity Trends, Critical Areas, and Next Actions.\n\n"
-        f"Patterns:\n{state.get('patterns', '')}\n\n"
-        f"Severity:\n{state.get('severity', '')}\n\n"
-        f"Critical Areas:\n{state.get('critical_areas', '')}\n"
+    prompt = _render_prompt(
+        "summary_synthesize",
+        patterns=state.get("patterns", ""),
+        severity=state.get("severity", ""),
+        critical_areas=state.get("critical_areas", ""),
     )
     return {"summary": _ollama_generate(prompt)}
 
 
 def _build_summary_graph() -> Any:
     graph = StateGraph(SummaryState)
-    graph.add_node("select_documents", _summary_select_documents)
-    graph.add_node("analyze_patterns", _summary_analyze_patterns)
-    graph.add_node("analyze_severity", _summary_analyze_severity)
-    graph.add_node("analyze_critical_areas", _summary_analyze_critical_areas)
-    graph.add_node("synthesize", _summary_synthesize)
+    graph.add_node("select_documents", _trace_node("summary.select_documents", _summary_select_documents))
+    graph.add_node("analyze_patterns", _trace_node("summary.analyze_patterns", _summary_analyze_patterns))
+    graph.add_node("analyze_severity", _trace_node("summary.analyze_severity", _summary_analyze_severity))
+    graph.add_node("analyze_critical_areas", _trace_node("summary.analyze_critical_areas", _summary_analyze_critical_areas))
+    graph.add_node("synthesize", _trace_node("summary.synthesize", _summary_synthesize))
 
     graph.add_edge(START, "select_documents")
     graph.add_edge("select_documents", "analyze_patterns")
@@ -311,15 +440,7 @@ def _run_legacy_summary(collection: Any, total: int) -> str:
     docs: list[str] = raw.get("documents", [])
     context = "\n".join(docs[:20])
 
-    prompt = (
-        "You are a software quality engineer. Analyze the following list of software defects "
-        "and provide:\n"
-        "1. A brief overall summary of the main issues.\n"
-        "2. Common patterns or recurring problems across different defects.\n"
-        "3. The most critical areas that need attention.\n\n"
-        f"Defects:\n{context}\n\n"
-        "Provide a concise, actionable analysis."
-    )
+    prompt = _render_prompt("legacy_summary", context=context)
     return _ollama_generate(prompt, timeout=120)
 
 
@@ -334,6 +455,9 @@ def _run_langgraph_summary(collection: Any) -> str:
             "severity": "",
             "critical_areas": "",
             "summary": "",
+            "trace_id": "",
+            "node_timings_ms": {},
+            "trace_events": [],
         }
     )
     return result.get("summary", "Unable to generate summary.")
@@ -402,7 +526,13 @@ def config() -> dict[str, Any]:
         "features": {
             "use_langgraph_query": USE_LANGGRAPH_QUERY,
             "use_langgraph_summary": USE_LANGGRAPH_SUMMARY,
+            "graph_trace_enabled": GRAPH_TRACE_ENABLED,
         }
+        ,
+        "prompts": {
+            "strategy": PROMPT_STRATEGY,
+            "version": PROMPT_VERSION,
+        },
     }
 
 

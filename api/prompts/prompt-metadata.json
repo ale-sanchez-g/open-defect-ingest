@@ -1,0 +1,11 @@
+{
+  "version": "1.0.0",
+  "prompts": {
+    "legacy_summary": "legacy-summary.txt",
+    "query_synthesis": "query-synthesis.txt",
+    "summary_analyze_patterns": "summary-analyze-patterns.txt",
+    "summary_analyze_severity": "summary-analyze-severity.txt",
+    "summary_analyze_critical_areas": "summary-analyze-critical-areas.txt",
+    "summary_synthesize": "summary-synthesize.txt"
+  }
+}

@@ -1,0 +1,4 @@
+You are a software quality engineer. Assess defect severity trends and risk concentration. Return concise bullets with priority guidance.
+
+Defects:
+{context}

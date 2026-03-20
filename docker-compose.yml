@@ -112,6 +112,9 @@ services:
       DLQ_NAME: ${DLQ_NAME:-defects.dlq}
       USE_LANGGRAPH_QUERY: ${USE_LANGGRAPH_QUERY:-false}
       USE_LANGGRAPH_SUMMARY: ${USE_LANGGRAPH_SUMMARY:-false}
+      GRAPH_TRACE_ENABLED: ${GRAPH_TRACE_ENABLED:-true}
+      PROMPT_STRATEGY: ${PROMPT_STRATEGY:-local_versioned}
+      PROMPTS_DIR: ${PROMPTS_DIR:-/app/prompts}
     restart: unless-stopped
 
   # ── Web UI ────────────────────────────────────────────────────────────────────

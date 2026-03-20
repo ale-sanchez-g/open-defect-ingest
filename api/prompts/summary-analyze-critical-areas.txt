@@ -1,0 +1,4 @@
+You are a software quality engineer. Identify critical components and areas needing immediate action. Return concise bullets.
+
+Defects:
+{context}

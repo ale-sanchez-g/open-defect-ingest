@@ -24,13 +24,42 @@ def test_health():
 
 
 def test_config_reports_feature_flags():
-    with patch("main.USE_LANGGRAPH_QUERY", False), patch("main.USE_LANGGRAPH_SUMMARY", True):
+    with patch("main.USE_LANGGRAPH_QUERY", False), patch("main.USE_LANGGRAPH_SUMMARY", True), patch(
+        "main.GRAPH_TRACE_ENABLED", True
+    ), patch("main.PROMPT_STRATEGY", "local_versioned"), patch("main.PROMPT_VERSION", "1.0.0"):
         resp = client.get("/config")
 
     assert resp.status_code == 200
     data = resp.json()
     assert data["features"]["use_langgraph_query"] is False
     assert data["features"]["use_langgraph_summary"] is True
+    assert data["features"]["graph_trace_enabled"] is True
+    assert data["prompts"]["strategy"] == "local_versioned"
+    assert data["prompts"]["version"] == "1.0.0"
+
+
+def test_trace_node_records_timing_and_trace_event():
+    from main import _trace_node
+
+    def _node_fn(_state):
+        return {"analysis": "ok"}
+
+    wrapped = _trace_node("query.synthesize", _node_fn)
+    out = wrapped({"trace_id": "", "node_timings_ms": {}, "trace_events": []})
+
+    assert out["trace_id"]
+    assert "query.synthesize" in out["node_timings_ms"]
+    assert out["node_timings_ms"]["query.synthesize"] >= 0
+    assert out["trace_events"][0]["node"] == "query.synthesize"
+
+
+def test_render_prompt_injects_variables():
+    from main import _render_prompt
+
+    with patch.dict("main.PROMPTS", {"query_synthesis": "route={route} query={query}"}, clear=False):
+        rendered = _render_prompt("query_synthesis", route="risk_focus", query="payment failed")
+
+    assert rendered == "route=risk_focus query=payment failed"
 
 
 # ── /queue/stats ──────────────────────────────────────────────────────────────

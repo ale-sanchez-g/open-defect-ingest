@@ -84,6 +84,10 @@ When `USE_LANGGRAPH_QUERY=true`, `/defects/query` includes additional fields:
 
 - `route` — query workflow route selected by graph router
 - `analysis` — concise synthesized guidance from retrieved results
+- `trace_id` — workflow trace identifier
+- `node_timings_ms` — per-node execution timings
+
+When graph tracing is enabled, API logs include node timing lines for query and summary workflows.
 
 ## Defect Schema
 
@@ -122,6 +126,9 @@ Phase 0 introduces runtime flags for progressive LangGraph rollout:
 
 - `USE_LANGGRAPH_QUERY` (default: `false`)
 - `USE_LANGGRAPH_SUMMARY` (default: `false`)
+- `GRAPH_TRACE_ENABLED` (default: `true`)
+- `PROMPT_STRATEGY` (default: `local_versioned`)
+- `PROMPTS_DIR` (default: `/app/prompts`)
 
 Current behavior remains legacy while these are `false`.
 
@@ -139,6 +146,16 @@ Verify active flag state:
 ```bash
 curl http://localhost:8080/config
 ```
+
+### Prompt version strategy
+
+Prompt templates are versioned as local files under [api/prompts](api/prompts):
+
+- [api/prompts/prompt-metadata.json](api/prompts/prompt-metadata.json) stores active prompt version and file mapping.
+- Prompt text files are loaded at startup when `PROMPT_STRATEGY=local_versioned`.
+- If prompt files are missing or invalid, API falls back to safe inline defaults.
+
+Runtime prompt strategy/version are exposed in `/config` under `prompts`.
 
 ### Horizontal scaling for ingestor workers
 
