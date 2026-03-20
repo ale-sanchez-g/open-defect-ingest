@@ -99,6 +99,14 @@ make test-ingestor
 make test-api
 ```
 
+## Troubleshooting
+
+- Symptom: Ingestor logs show `Failed to process defect: '_type'`.
+- Cause: Chroma server/client version mismatch (for example, server `1.x` with Python client `0.5.23`).
+- Fix: Keep Chroma server and Python client on the same compatible line. This project pins:
+  - Docker image: `chromadb/chroma:0.5.23`
+  - Python package: `chromadb==0.5.23`
+
 ### Local UI development
 
 ```bash

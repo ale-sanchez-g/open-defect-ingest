@@ -97,7 +97,7 @@ def process_message(ch: Any, method: Any, properties: Any, body: bytes) -> None:
         ch.basic_ack(delivery_tag=method.delivery_tag)
         logger.info("Defect %s stored successfully", defect.get("id"))
     except Exception as exc:  # noqa: BLE001
-        logger.error("Failed to process defect: %s", exc)
+        logger.exception("Failed to process defect: %s", exc)
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 
