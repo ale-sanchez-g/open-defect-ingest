@@ -15,12 +15,11 @@ from typing import Any
 import chromadb
 import pika
 import requests
+from datadog import initialize, statsd
+from ddtrace import tracer
+from shared.logging_utils import get_datadog_logger
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-logger = logging.getLogger(__name__)
+logger = get_datadog_logger(__name__, "open-defect-ingestor")
 
 # ── Configuration ────────────────────────────────────────────────────────────
 RABBITMQ_URL: str = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
@@ -34,6 +33,32 @@ PREFETCH_COUNT: int = int(os.getenv("PREFETCH_COUNT", "1"))
 DLX_EXCHANGE: str = os.getenv("DLX_EXCHANGE", f"{QUEUE_NAME}.dlx")
 DLQ_NAME: str = os.getenv("DLQ_NAME", f"{QUEUE_NAME}.dlq")
 METRICS_LOG_INTERVAL_SECONDS: int = int(os.getenv("METRICS_LOG_INTERVAL_SECONDS", "30"))
+DD_TELEMETRY_ENABLED: bool = os.getenv("DD_TELEMETRY_ENABLED", "true").lower() == "true"
+DD_AI_TELEMETRY_ENABLED: bool = os.getenv("DD_AI_TELEMETRY_ENABLED", "true").lower() == "true"
+DD_AGENT_HOST: str = os.getenv("DD_AGENT_HOST", "datadog-agent")
+DD_DOGSTATSD_PORT: int = int(os.getenv("DD_DOGSTATSD_PORT", "8125"))
+DD_METRICS_NAMESPACE: str = os.getenv("DD_METRICS_NAMESPACE", "open_defect_ingest.ingestor")
+
+if DD_TELEMETRY_ENABLED:
+    initialize(statsd_host=DD_AGENT_HOST, statsd_port=DD_DOGSTATSD_PORT)
+
+
+def _dd_increment(metric_name: str, value: int = 1, tags: list[str] | None = None) -> None:
+    if not DD_TELEMETRY_ENABLED:
+        return
+    try:
+        statsd.increment(f"{DD_METRICS_NAMESPACE}.{metric_name}", value=value, tags=tags)
+    except Exception:  # noqa: BLE001
+        logger.debug("Datadog metric increment failed for %s", metric_name)
+
+
+def _dd_timing(metric_name: str, value_ms: float, tags: list[str] | None = None) -> None:
+    if not DD_TELEMETRY_ENABLED:
+        return
+    try:
+        statsd.timing(f"{DD_METRICS_NAMESPACE}.{metric_name}", value_ms, tags=tags)
+    except Exception:  # noqa: BLE001
+        logger.debug("Datadog metric timing failed for %s", metric_name)
 
 METRICS: dict[str, float] = {
     "processed_total": 0.0,
@@ -54,13 +79,32 @@ def get_embedding(
     model: str = EMBED_MODEL,
 ) -> list[float]:
     """Return a vector embedding for *text* produced by Ollama."""
-    response = requests.post(
-        f"{ollama_host}/api/embeddings",
-        json={"model": model, "prompt": text},
-        timeout=60,
-    )
-    response.raise_for_status()
-    return response.json()["embedding"]
+    started_at = time.monotonic()
+    with tracer.trace("ai.ollama.embeddings", resource="embeddings") as span:
+        span.set_tag("ai.provider", "ollama")
+        span.set_tag("ai.model", model)
+        span.set_tag("ai.operation", "embeddings")
+        span.set_tag("ai.telemetry.enabled", DD_AI_TELEMETRY_ENABLED)
+        span.set_metric("ai.prompt.characters", float(len(text)))
+
+        try:
+            response = requests.post(
+                f"{ollama_host}/api/embeddings",
+                json={"model": model, "prompt": text},
+                timeout=60,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            embedding = payload["embedding"]
+
+            elapsed_ms = (time.monotonic() - started_at) * 1000
+            _dd_increment("ollama.embedding.requests", tags=["model:" + model, "status:success"])
+            _dd_timing("ollama.embedding.latency_ms", elapsed_ms, tags=["model:" + model])
+            span.set_metric("ai.response.vector_size", float(len(embedding)))
+            return embedding
+        except Exception:
+            _dd_increment("ollama.embedding.requests", tags=["model:" + model, "status:error"])
+            raise
 
 
 def store_defect(
@@ -165,20 +209,28 @@ def _declare_primary_queue(channel: Any, queue_name: str) -> Any:
 def process_message(ch: Any, method: Any, properties: Any, body: bytes) -> None:
     """Handle a single RabbitMQ delivery."""
     started_at = time.monotonic()
-    try:
-        defect: dict[str, Any] = json.loads(body)
-        logger.info("Processing defect id=%s", defect.get("id", "unknown"))
-        store_defect(defect)
-        ch.basic_ack(delivery_tag=method.delivery_tag)
-        elapsed_ms = int((time.monotonic() - started_at) * 1000)
-        _record_processing_metrics(success=True, elapsed_ms=elapsed_ms)
-        logger.info("Defect %s stored successfully in %sms", defect.get("id"), elapsed_ms)
-    except Exception as exc:  # noqa: BLE001
-        elapsed_ms = int((time.monotonic() - started_at) * 1000)
-        logger.exception("Failed to process defect: %s", exc)
-        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
-        _record_processing_metrics(success=False, elapsed_ms=elapsed_ms)
-        logger.error("Defect delivery failed and routed to DLQ in %sms", elapsed_ms)
+    with tracer.trace("ingestor.process_message", resource=QUEUE_NAME) as span:
+        span.set_tag("queue.name", QUEUE_NAME)
+        span.set_tag("ai.telemetry.enabled", DD_AI_TELEMETRY_ENABLED)
+        try:
+            defect: dict[str, Any] = json.loads(body)
+            span.set_tag("defect.id", defect.get("id", "unknown"))
+            logger.info("Processing defect id=%s", defect.get("id", "unknown"))
+            store_defect(defect)
+            ch.basic_ack(delivery_tag=method.delivery_tag)
+            elapsed_ms = int((time.monotonic() - started_at) * 1000)
+            _record_processing_metrics(success=True, elapsed_ms=elapsed_ms)
+            _dd_increment("queue.processed", tags=["status:success"])
+            _dd_timing("queue.processing_latency_ms", float(elapsed_ms), tags=["status:success"])
+            logger.info("Defect %s stored successfully in %sms", defect.get("id"), elapsed_ms)
+        except Exception as exc:  # noqa: BLE001
+            elapsed_ms = int((time.monotonic() - started_at) * 1000)
+            logger.exception("Failed to process defect: %s", exc)
+            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+            _record_processing_metrics(success=False, elapsed_ms=elapsed_ms)
+            _dd_increment("queue.processed", tags=["status:error"])
+            _dd_timing("queue.processing_latency_ms", float(elapsed_ms), tags=["status:error"])
+            logger.error("Defect delivery failed and routed to DLQ in %sms", elapsed_ms)
 
 
 # ── Consumer loop ─────────────────────────────────────────────────────────────

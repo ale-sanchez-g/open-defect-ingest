@@ -28,6 +28,7 @@ A smart defect ingestor that captures bugs from all your projects and builds a c
 | **Ingestor** | — | Worker that consumes from RabbitMQ and stores embeddings |
 | **API** | 8080 | FastAPI REST service |
 | **UI** | 3000 | React dashboard |
+| **Datadog Agent** | 8126 / 8125 UDP | Collects logs, APM traces, runtime metrics, and custom DogStatsD metrics |
 
 ## Quick Start
 
@@ -41,6 +42,26 @@ A smart defect ingestor that captures bugs from all your projects and builds a c
 cp .env.example .env   # optional — override defaults
 docker compose up -d --build
 ```
+
+### 2.1 — Configure Datadog (required for observability data export)
+
+Set at least these variables in `.env`:
+
+```dotenv
+DD_API_KEY=<your_datadog_api_key>
+DD_SITE=datadoghq.com
+DD_ENV=local
+DD_TRACE_LANGCHAIN_ENABLED=false
+```
+
+The stack includes a `datadog-agent` service and both Python services (`api`, `ingestor`) run under `ddtrace-run`.
+
+Telemetry covered by default:
+
+- Logs: container logs are collected by the agent.
+- Traces: FastAPI, requests/pika instrumentation, and custom spans.
+- Metrics: DogStatsD counters/timings from API and ingestor.
+- AI telemetry: explicit spans and metrics around Ollama embedding/completion calls.
 
 ### 3 — Pull LLM models (first run only)
 
@@ -113,6 +134,53 @@ make test-api
 ```
 
 ## Troubleshooting
+
+### Datadog verification checklist
+
+After starting the stack and generating traffic (ingest defects, run query + summary):
+
+```bash
+docker compose ps datadog-agent
+docker compose logs datadog-agent | tail -n 50
+docker compose logs api | tail -n 50
+docker compose logs ingestor | tail -n 50
+```
+
+In Datadog UI, verify:
+
+- APM services include `open-defect-api` and `open-defect-ingestor`.
+- Logs include entries from `api` and `ingestor` containers.
+- Metrics include:
+  - `open_defect_ingest.api.ollama.embedding.requests`
+  - `open_defect_ingest.api.ollama.completion.requests`
+  - `open_defect_ingest.ingestor.queue.processed`
+- AI traces include spans named:
+  - `ai.ollama.embeddings`
+  - `ai.ollama.completion`
+
+### Ollama runner startup timeout mitigation
+
+If you see logs like:
+
+```text
+timed out waiting for llama runner to start: context canceled
+```
+
+apply these runtime controls (already wired in compose/env):
+
+- `OLLAMA_NUM_PARALLEL=1`
+- `OLLAMA_MAX_LOADED_MODELS=1`
+- `OLLAMA_KEEP_ALIVE=30m`
+
+These settings reduce model load contention and keep runners warm between requests.
+
+After changing values, restart impacted services:
+
+```bash
+docker compose up -d ollama api ingestor
+```
+
+Note on Datadog log status: Ollama logs can include an `error="..."` field even when `level=INFO`. In Datadog pipelines, map status from parsed `level` instead of any generic `error` field to avoid false error classification.
 
 - Symptom: Ingestor logs show `Failed to process defect: '_type'`.
 - Cause: Chroma server/client version mismatch (for example, server `1.x` with Python client `0.5.23`).

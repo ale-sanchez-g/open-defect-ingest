@@ -23,12 +23,15 @@ from urllib.parse import urlparse, urlunparse
 import chromadb
 import pika
 import requests
+from datadog import initialize, statsd
+from ddtrace import tracer
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_community.vectorstores import Chroma as LangChainChroma
 from langchain_ollama import OllamaEmbeddings
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel
+from shared.logging_utils import get_datadog_logger
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 RABBITMQ_HOST: str = os.getenv("RABBITMQ_HOST", "localhost")
@@ -51,11 +54,37 @@ PROMPT_STRATEGY: str = os.getenv("PROMPT_STRATEGY", "local_versioned")
 PROMPTS_DIR: str = os.getenv("PROMPTS_DIR", "/app/prompts")
 OPM_BASE_URL: str = os.getenv("OPM_BASE_URL", "")
 OPM_TIMEOUT_SECONDS: int = int(os.getenv("OPM_TIMEOUT_SECONDS", "5"))
+DD_TELEMETRY_ENABLED: bool = os.getenv("DD_TELEMETRY_ENABLED", "true").lower() == "true"
+DD_AI_TELEMETRY_ENABLED: bool = os.getenv("DD_AI_TELEMETRY_ENABLED", "true").lower() == "true"
+DD_AGENT_HOST: str = os.getenv("DD_AGENT_HOST", "datadog-agent")
+DD_DOGSTATSD_PORT: int = int(os.getenv("DD_DOGSTATSD_PORT", "8125"))
+DD_METRICS_NAMESPACE: str = os.getenv("DD_METRICS_NAMESPACE", "open_defect_ingest.api")
 
 SUMMARY_JOBS: dict[str, dict[str, Any]] = {}
 SUMMARY_JOBS_LOCK = threading.Lock()
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger = get_datadog_logger(__name__, "open-defect-api")
+
+if DD_TELEMETRY_ENABLED:
+    initialize(statsd_host=DD_AGENT_HOST, statsd_port=DD_DOGSTATSD_PORT)
+
+
+def _dd_increment(metric_name: str, value: int = 1, tags: Optional[list[str]] = None) -> None:
+    if not DD_TELEMETRY_ENABLED:
+        return
+    try:
+        statsd.increment(f"{DD_METRICS_NAMESPACE}.{metric_name}", value=value, tags=tags)
+    except Exception:  # noqa: BLE001
+        logger.debug("Datadog metric increment failed for %s", metric_name)
+
+
+def _dd_timing(metric_name: str, value_ms: float, tags: Optional[list[str]] = None) -> None:
+    if not DD_TELEMETRY_ENABLED:
+        return
+    try:
+        statsd.timing(f"{DD_METRICS_NAMESPACE}.{metric_name}", value_ms, tags=tags)
+    except Exception:  # noqa: BLE001
+        logger.debug("Datadog metric timing failed for %s", metric_name)
+
 PROMPT_VERSION: str = "inline-defaults"
 PROMPT_SOURCE: str = "inline-defaults"
 OPM_PROMPT_NAMES: dict[str, str] = {}
@@ -165,13 +194,32 @@ def _chroma_collection() -> Any:
 
 
 def _get_embedding(text: str) -> list[float]:
-    resp = requests.post(
-        f"{OLLAMA_HOST}/api/embeddings",
-        json={"model": EMBED_MODEL, "prompt": text},
-        timeout=60,
-    )
-    resp.raise_for_status()
-    return resp.json()["embedding"]
+    started_at = time.monotonic()
+    with tracer.trace("ai.ollama.embeddings", resource="embeddings") as span:
+        span.set_tag("ai.provider", "ollama")
+        span.set_tag("ai.model", EMBED_MODEL)
+        span.set_tag("ai.operation", "embeddings")
+        span.set_tag("ai.telemetry.enabled", DD_AI_TELEMETRY_ENABLED)
+        span.set_metric("ai.prompt.characters", float(len(text)))
+
+        try:
+            resp = requests.post(
+                f"{OLLAMA_HOST}/api/embeddings",
+                json={"model": EMBED_MODEL, "prompt": text},
+                timeout=60,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            embedding = payload["embedding"]
+
+            elapsed_ms = (time.monotonic() - started_at) * 1000
+            _dd_increment("ollama.embedding.requests", tags=["model:" + EMBED_MODEL, "status:success"])
+            _dd_timing("ollama.embedding.latency_ms", elapsed_ms, tags=["model:" + EMBED_MODEL])
+            span.set_metric("ai.response.vector_size", float(len(embedding)))
+            return embedding
+        except Exception:
+            _dd_increment("ollama.embedding.requests", tags=["model:" + EMBED_MODEL, "status:error"])
+            raise
 
 
 def _langchain_retriever(k: int) -> Any:
@@ -506,13 +554,31 @@ def _run_langgraph_query(query: str, n_results: int) -> dict[str, Any]:
 
 
 def _ollama_generate(prompt: str, timeout: int = SUMMARY_JOB_TIMEOUT_SECONDS) -> str:
-    llm_resp = requests.post(
-        f"{OLLAMA_HOST}/api/generate",
-        json={"model": LLM_MODEL, "prompt": prompt, "stream": False},
-        timeout=timeout,
-    )
-    llm_resp.raise_for_status()
-    return llm_resp.json().get("response", "Unable to generate summary.")
+    started_at = time.monotonic()
+    with tracer.trace("ai.ollama.completion", resource="generate") as span:
+        span.set_tag("ai.provider", "ollama")
+        span.set_tag("ai.model", LLM_MODEL)
+        span.set_tag("ai.operation", "completion")
+        span.set_tag("ai.telemetry.enabled", DD_AI_TELEMETRY_ENABLED)
+        span.set_metric("ai.prompt.characters", float(len(prompt)))
+
+        try:
+            llm_resp = requests.post(
+                f"{OLLAMA_HOST}/api/generate",
+                json={"model": LLM_MODEL, "prompt": prompt, "stream": False},
+                timeout=timeout,
+            )
+            llm_resp.raise_for_status()
+            response_text = llm_resp.json().get("response", "Unable to generate summary.")
+
+            elapsed_ms = (time.monotonic() - started_at) * 1000
+            _dd_increment("ollama.completion.requests", tags=["model:" + LLM_MODEL, "status:success"])
+            _dd_timing("ollama.completion.latency_ms", elapsed_ms, tags=["model:" + LLM_MODEL])
+            span.set_metric("ai.response.characters", float(len(response_text)))
+            return response_text
+        except Exception:
+            _dd_increment("ollama.completion.requests", tags=["model:" + LLM_MODEL, "status:error"])
+            raise
 
 
 def _summary_select_documents(state: SummaryState) -> SummaryState:
@@ -729,8 +795,9 @@ def query_defects(request: QueryRequest) -> dict[str, Any]:
     """Semantic search — find defects similar to the query using vector embeddings."""
     try:
         if USE_LANGGRAPH_QUERY:
+            logger.info("Processing query with LangGraph route: %s", request.query)
             return _run_langgraph_query(request.query, int(request.n_results or 5))
-
+        logger.info("Processing query with legacy route: %s", request.query)
         results = _run_legacy_query(request.query, int(request.n_results or 5))
         return {"query": request.query, "results": results}
     except Exception as exc:  # noqa: BLE001

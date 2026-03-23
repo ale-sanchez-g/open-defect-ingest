@@ -3,6 +3,8 @@ uvicorn[standard]==0.34.0
 pika==1.3.2
 chromadb==0.5.23
 requests==2.32.3
+ddtrace>=2.11.0,<3.0.0
+datadog>=0.51.0,<1.0.0
 # Phase 1 migration dependencies (LangGraph + LangChain)
 langgraph>=0.2.0,<0.3.0
 langchain>=0.3.0,<0.4.0

@@ -2,9 +2,10 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY ingestor/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py .
+COPY ingestor/main.py ./main.py
+COPY shared ./shared
 
-CMD ["python", "main.py"]
+CMD ["ddtrace-run", "python", "main.py"]
