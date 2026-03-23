@@ -27,6 +27,7 @@ from datadog import initialize, statsd
 from ddtrace import tracer
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from langchain_community.vectorstores import Chroma as LangChainChroma
 from langchain_ollama import OllamaEmbeddings
 from langgraph.graph import END, START, StateGraph
@@ -553,6 +554,62 @@ def _run_langgraph_query(query: str, n_results: int) -> dict[str, Any]:
     }
 
 
+def _stream_query_synthesis(query: str, n_results: int):
+    """SSE generator: emit retrieval results immediately then stream synthesis tokens."""
+    if USE_LANGGRAPH_QUERY:
+        initial_state: QueryState = {
+            "query": query,
+            "n_results": n_results,
+            "route": "",
+            "results": [],
+            "analysis": "",
+            "trace_id": "",
+            "node_timings_ms": {},
+            "trace_events": [],
+        }
+        route_state = _query_route_node(initial_state)
+        retrieve_state = _query_retrieve_node({**initial_state, **route_state})
+        results = retrieve_state.get("results", [])
+        route = route_state.get("route", "semantic_search")
+    else:
+        results = _run_legacy_query(query, n_results)
+        route = "semantic_search"
+
+    yield f"event: results\ndata: {json.dumps({'query': query, 'results': results, 'route': route})}\n\n"
+
+    if not results or not USE_LANGGRAPH_QUERY:
+        yield "event: done\ndata: {}\n\n"
+        return
+
+    context = "\n".join(
+        f"- {item['metadata'].get('title', item['id'])}: {item['document'][:280]}"
+        for item in results[:5]
+    )
+    prompt = _render_prompt("query_synthesis", route=route, query=query, context=context)
+
+    try:
+        with requests.post(
+            f"{OLLAMA_HOST}/api/generate",
+            json={"model": LLM_MODEL, "prompt": prompt, "stream": True},
+            stream=True,
+            timeout=SUMMARY_JOB_TIMEOUT_SECONDS,
+        ) as resp:
+            resp.raise_for_status()
+            for raw_line in resp.iter_lines():
+                if not raw_line:
+                    continue
+                chunk = json.loads(raw_line)
+                token = chunk.get("response", "")
+                if token:
+                    yield f"event: token\ndata: {json.dumps({'token': token})}\n\n"
+                if chunk.get("done"):
+                    break
+    except Exception as exc:
+        yield f"event: error\ndata: {json.dumps({'detail': str(exc)})}\n\n"
+
+    yield "event: done\ndata: {}\n\n"
+
+
 def _ollama_generate(prompt: str, timeout: int = SUMMARY_JOB_TIMEOUT_SECONDS) -> str:
     started_at = time.monotonic()
     with tracer.trace("ai.ollama.completion", resource="generate") as span:
@@ -802,6 +859,16 @@ def query_defects(request: QueryRequest) -> dict[str, Any]:
         return {"query": request.query, "results": results}
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/defects/query/stream", tags=["Defects"])
+def query_defects_stream(request: QueryRequest) -> StreamingResponse:
+    """Streaming semantic search — returns results immediately then streams synthesis tokens via SSE."""
+    return StreamingResponse(
+        _stream_query_synthesis(request.query, int(request.n_results or 5)),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/defects/summary", tags=["Defects"])

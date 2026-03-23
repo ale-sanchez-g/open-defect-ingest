@@ -128,7 +128,7 @@ services:
       context: .
       dockerfile: ingestor/Dockerfile
     labels:
-      com.datadoghq.ad.logs: '[{"source":"python","service":"${DD_INGESTOR_SERVICE:-open-defect-ingestor}"}]'
+      com.datadoghq.ad.logs: '[{"source":"nginx","service":"${DD_INGESTOR_SERVICE:-open-defect-ingestor}"}]'
       com.datadoghq.tags.env: "${DD_ENV:-local}"
       com.datadoghq.tags.service: "${DD_INGESTOR_SERVICE:-open-defect-ingestor}"
       com.datadoghq.tags.version: "${DD_VERSION:-1.0.0}"
@@ -175,7 +175,7 @@ services:
       context: .
       dockerfile: api/Dockerfile
     labels:
-      com.datadoghq.ad.logs: '[{"source":"python","service":"${DD_API_SERVICE:-open-defect-api}"}]'
+      com.datadoghq.ad.logs: '[{"source":"nginx","service":"${DD_API_SERVICE:-open-defect-api}"}]'
       com.datadoghq.tags.env: "${DD_ENV:-local}"
       com.datadoghq.tags.service: "${DD_API_SERVICE:-open-defect-api}"
       com.datadoghq.tags.version: "${DD_VERSION:-1.0.0}"
