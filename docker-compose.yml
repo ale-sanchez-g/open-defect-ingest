@@ -2,6 +2,12 @@ services:
   # ── Datadog observability agent ──────────────────────────────────────────────
   datadog-agent:
     image: datadog/agent:7
+    labels:
+      com.datadoghq.ad.logs: '[{"source":"datadog-agent","service":"open-defect-datadog-agent"}]'
+      com.datadoghq.tags.env: "${DD_ENV:-local}"
+      com.datadoghq.tags.service: "open-defect-datadog-agent"
+      com.datadoghq.tags.version: "${DD_VERSION:-1.0.0}"
+      my.custom.label.team: "platform"
     environment:
       DD_API_KEY: ${DD_API_KEY:-}
       DD_SITE: ${DD_SITE:-datadoghq.com}
@@ -25,6 +31,12 @@ services:
   # ── Message broker ──────────────────────────────────────────────────────────
   rabbitmq:
     image: rabbitmq:3-management
+    labels:
+      com.datadoghq.ad.logs: '[{"source":"rabbitmq","service":"open-defect-rabbitmq"}]'
+      com.datadoghq.tags.env: "${DD_ENV:-local}"
+      com.datadoghq.tags.service: "open-defect-rabbitmq"
+      com.datadoghq.tags.version: "${DD_VERSION:-1.0.0}"
+      my.custom.label.team: "platform"
     ports:
       - "5672:5672"
       - "15672:15672"
@@ -43,6 +55,12 @@ services:
   # ── Vector database ─────────────────────────────────────────────────────────
   chromadb:
     image: chromadb/chroma:0.5.23
+    labels:
+      com.datadoghq.ad.logs: '[{"source":"python","service":"open-defect-chromadb"}]'
+      com.datadoghq.tags.env: "${DD_ENV:-local}"
+      com.datadoghq.tags.service: "open-defect-chromadb"
+      com.datadoghq.tags.version: "${DD_VERSION:-1.0.0}"
+      my.custom.label.team: "platform"
     expose:
       - "8000"
     environment:
@@ -60,6 +78,12 @@ services:
   # ── Local LLM (embeddings + generation) ─────────────────────────────────────
   ollama:
     image: ollama/ollama:latest
+    labels:
+      com.datadoghq.ad.logs: '[{"source":"docker","service":"open-defect-ollama"}]'
+      com.datadoghq.tags.env: "${DD_ENV:-local}"
+      com.datadoghq.tags.service: "open-defect-ollama"
+      com.datadoghq.tags.version: "${DD_VERSION:-1.0.0}"
+      my.custom.label.team: "platform"
     ports:
       - "11434:11434"
     environment:
@@ -78,6 +102,12 @@ services:
   # One-time model-pull job (runs after ollama is healthy, then exits)
   ollama-setup:
     image: ollama/ollama:latest
+    labels:
+      com.datadoghq.ad.logs: '[{"source":"docker","service":"open-defect-ollama-setup"}]'
+      com.datadoghq.tags.env: "${DD_ENV:-local}"
+      com.datadoghq.tags.service: "open-defect-ollama-setup"
+      com.datadoghq.tags.version: "${DD_VERSION:-1.0.0}"
+      my.custom.label.team: "platform"
     depends_on:
       ollama:
         condition: service_healthy
@@ -97,6 +127,12 @@ services:
     build:
       context: .
       dockerfile: ingestor/Dockerfile
+    labels:
+      com.datadoghq.ad.logs: '[{"source":"python","service":"${DD_INGESTOR_SERVICE:-open-defect-ingestor}"}]'
+      com.datadoghq.tags.env: "${DD_ENV:-local}"
+      com.datadoghq.tags.service: "${DD_INGESTOR_SERVICE:-open-defect-ingestor}"
+      com.datadoghq.tags.version: "${DD_VERSION:-1.0.0}"
+      my.custom.label.team: "ingestion"
     environment:
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672/
       CHROMA_HOST: chromadb
@@ -138,6 +174,12 @@ services:
     build:
       context: .
       dockerfile: api/Dockerfile
+    labels:
+      com.datadoghq.ad.logs: '[{"source":"python","service":"${DD_API_SERVICE:-open-defect-api}"}]'
+      com.datadoghq.tags.env: "${DD_ENV:-local}"
+      com.datadoghq.tags.service: "${DD_API_SERVICE:-open-defect-api}"
+      com.datadoghq.tags.version: "${DD_VERSION:-1.0.0}"
+      my.custom.label.team: "api"
     ports:
       - "8080:8080"
     environment:
@@ -188,6 +230,12 @@ services:
   ui:
     build:
       context: ./ui
+    labels:
+      com.datadoghq.ad.logs: '[{"source":"nginx","service":"open-defect-ui"}]'
+      com.datadoghq.tags.env: "${DD_ENV:-local}"
+      com.datadoghq.tags.service: "open-defect-ui"
+      com.datadoghq.tags.version: "${DD_VERSION:-1.0.0}"
+      my.custom.label.team: "frontend"
     ports:
       - "3000:80"
     depends_on:

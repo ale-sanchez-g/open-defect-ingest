@@ -3,6 +3,88 @@
 ## Goal
 Validate that the application works end-to-end with legacy AI paths before enabling LangGraph/LangChain flags.
 
+## How to run the tests
+
+Use this exact sequence to reproduce the same process (API + UI + Datadog) in another agent/chat.
+
+### 1) Start in legacy mode
+Run from repo root:
+
+```bash
+export USE_LANGGRAPH_QUERY=false
+export USE_LANGGRAPH_SUMMARY=false
+export DD_ENV=local
+docker compose up -d --build
+docker compose ps
+```
+
+Expected: all services are `Up` (especially `api`, `ingestor`, `ui`, `rabbitmq`, `chromadb`, `ollama`, `datadog-agent`).
+
+### 2) Execute API functional pass (TC-01..TC-10)
+Preferred approach is a single scripted run that writes a JSON artifact:
+
+```bash
+python3 /tmp/rerun_api.py > /tmp/rerun_api_stdout.txt 2>&1
+cat /tmp/rerun_api_results.json
+```
+
+Required artifact shape:
+- `run_tag`
+- `ids`
+- `TC-01` through `TC-10`
+
+Pass criteria for this repo baseline:
+- TC-01..TC-08 return `200`.
+- TC-09 may return `500` around 120s (known timeout baseline).
+- TC-10 may fail around 180s (known timeout baseline).
+
+### 3) Execute UI validation pass (TC-11..TC-14)
+Open UI at `http://localhost:3000` and validate in this order:
+1. Queue Dashboard renders with queue counters.
+2. Ingest Defect tab can submit one test defect (for reruns, use an id like `RERUN-UI-1`).
+3. Query tab returns non-empty results.
+4. AI Summary tab is triggered and observed long enough to capture success or timeout behavior.
+
+Capture:
+- Network outcomes for `/api/queue/stats`, `/api/defects/ingest`, `/api/defects/query`, summary endpoints.
+- Browser console error count.
+
+### 4) Execute Datadog validation pass (TC-15..TC-17)
+Use these queries as the baseline checks:
+
+- Logs:
+	- `(service:open-defect-api OR service:open-defect-ingestor) env:local ("LEGACY-TC-A" OR "LEGACY-TC-B" OR "LEGACY-UI-1" OR "RERUN")`
+- APM spans:
+	- `service:open-defect-ingestor operation_name:ingestor.process_message`
+	- `service:open-defect-ingestor operation_name:ai.ollama.embeddings`
+	- `service:open-defect-api operation_name:ai.ollama.completion`
+	- `service:open-defect-api operation_name:fastapi.request @http.status_code:500`
+	- `service:open-defect-api operation_name:fastapi.request @http.status_code:200 @http.path_group:/defects/query`
+- Metrics prefix:
+	- `open_defect_ingest.`
+
+### 5) MCP tool sequence to replicate in another chat
+Run the same orchestration pattern used in this conversation:
+
+1. `run_in_terminal`
+	- Start stack in legacy mode, run API script, and collect JSON artifact.
+2. Browser tools (`open_browser_page`, then interaction/capture tools)
+	- Validate UI queue/ingest/query/summary behavior and collect network + console evidence.
+3. Datadog APM tool (`mcp_datadog_search_datadog_spans`)
+	- Validate success spans and summary-timeout error traces.
+4. Datadog logs/metrics tools (from activated Datadog tool groups)
+	- Validate log markers and custom metrics presence.
+5. `apply_patch`
+	- Update this report with latest run summary and evidence snapshot.
+
+### 6) Update report consistently
+When writing rerun results, keep this format:
+1. Update/append a dated summary block with `PASS`, `FAIL`, `KNOWN_BASELINE`, `TOTAL`.
+2. Include run identifiers (`run_tag`, defect ids, async `job_id`).
+3. Include at least one API timeout evidence line for TC-09/TC-10 if reproduced.
+4. Include at least one UI evidence line and one Datadog evidence line.
+
+
 ## Test Scope
 - API behavior
 - Worker ingestion flow
@@ -57,7 +139,7 @@ Validate that the application works end-to-end with legacy AI paths before enabl
 | TC-16 | Datadog APM | Confirm AI trace spans are emitted. | Generate ingest/query/summary traffic; search spans. | Spans `ai.ollama.embeddings` and `ai.ollama.completion` are present. | PASS | Focused pass confirmed spans with correct Datadog query syntax: `service:open-defect-ingestor operation_name:ai.ollama.embeddings` (count 6) and `service:open-defect-api operation_name:ai.ollama.completion` (count 21, including timeout error spans). |
 | TC-17 | Datadog Metrics | Confirm custom metric emission. | Search Datadog metrics after test traffic. | Metrics include `open_defect_ingest.api.ollama.embedding.requests`, `open_defect_ingest.api.ollama.completion.requests`, `open_defect_ingest.ingestor.queue.processed`. | PASS | Datadog metrics search returned all expected custom metrics plus latency series. |
 
-## Latest Run Summary (2026-03-23)
+## Previous Run Summary (2026-03-23)
 
 | Category | Count | Notes |
 |---|---:|---|
@@ -65,6 +147,32 @@ Validate that the application works end-to-end with legacy AI paths before enabl
 | FAIL | 1 | TC-10 async summary job still fails on Ollama read timeout at ~180s. |
 | KNOWN_BASELINE | 2 | TC-09 and TC-14 summary timeout behavior captured as baseline risk. |
 | TOTAL | 17 | Full suite executed, including second focused isolation pass. |
+
+## Latest Rerun Summary (2026-03-23, run_tag=RERUN-053600)
+
+| Category | Count | Notes |
+|---|---:|---|
+| PASS | 14 | TC-01..TC-08 and TC-11..TC-13 plus TC-15..TC-17 validated again in rerun. |
+| FAIL | 1 | TC-10 async summary job `65bf6b29-a092-429a-a3f0-56cf5c12b0a0` failed with Ollama read timeout at 180s. |
+| KNOWN_BASELINE | 2 | TC-09 and TC-14 summary timeout behavior reproduced in rerun. |
+| TOTAL | 17 | Full suite rerun after latest code changes. |
+
+### Rerun Evidence Snapshot
+- API rerun artifact (`/tmp/rerun_api_results.json`):
+	- TC-01..TC-08 returned HTTP `200`.
+	- TC-09 returned HTTP `500` after `120.42s` with `read timeout=120`.
+	- TC-10 async summary job failed (`status=failed`) and result endpoint returned HTTP `500` with `read timeout=180`.
+- UI rerun checks:
+	- Queue Dashboard loaded and updated.
+	- Ingest success confirmed for `RERUN-UI-1`.
+	- Query tab returned results.
+	- Summary tab stayed in `Analyzing...` during observation window (consistent with summary timeout baseline).
+	- Browser console errors observed: `0`.
+- Datadog rerun validation:
+	- Ingestor spans present for rerun defects: `ingestor.process_message` showed `defect.id=RERUN-053600-A` and `defect.id=RERUN-UI-1`.
+	- API success traces present: `POST /defects/query` with HTTP `200`.
+	- API error traces present: `GET /defects/summary` and `GET /defects/summary/jobs/{job_id}/result` with HTTP `500`.
+	- AI spans remained present for rerun traffic: `ai.ollama.embeddings` and `ai.ollama.completion`.
 
 ### Outstanding Issue
 - TC-10 remains unresolved: async summary jobs fail with `HTTPConnectionPool(host='ollama', port=11434): Read timed out. (read timeout=180)`.
