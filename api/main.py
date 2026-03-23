@@ -299,6 +299,7 @@ def _normalize_opm_api_base_url(raw_base_url: str) -> str:
 def _opm_api_candidates(raw_base_url: str) -> list[str]:
     """Build candidate OPM API base URLs with Docker localhost fallback."""
     primary = _normalize_opm_api_base_url(raw_base_url)
+    in_container = Path("/.dockerenv").exists()
     candidates = [primary]
 
     parsed = urlparse(primary)
@@ -321,7 +322,10 @@ def _opm_api_candidates(raw_base_url: str) -> list[str]:
 
         fallback = urlunparse((parsed.scheme, fallback_netloc, parsed.path, "", "", ""))
         if fallback not in candidates:
-            candidates.append(fallback)
+            if in_container:
+                candidates = [fallback, *candidates]
+            else:
+                candidates.append(fallback)
 
     return candidates
 
