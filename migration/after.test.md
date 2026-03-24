@@ -134,7 +134,20 @@ Follow this order in the chat agent:
 | TC-17 | Datadog Metrics | Confirm custom metric emission. | Search Datadog metrics after traffic. | Metrics include expected `open_defect_ingest.*` series. | PASS | Datadog metrics search returned expected families including `open_defect_ingest.api.ollama.*` and `open_defect_ingest.ingestor.queue.processed`. |
 
 ## Latest Run Summary
+### Run 3 — `P5-1-REDEPLOY` (side-by-side validation, feature flag redeploy, Datadog MCP evidence)
 
+| Category | Count | Notes |
+|---|---:|---|
+| PASS | 3 | Stack redeployed in both legacy and LangGraph modes; API/ingestor/UI assets rebuilt. |
+| INFO | 2 | Datadog logs show only startup and prompt loading (no defect traffic in this run). |
+| INFO | 2 | APM spans present for API startup, but no AI/ingestor spans (no test traffic). |
+| TOTAL | 7 | Side-by-side validation and observability checks completed; plan updated. |
+
+#### Evidence Snapshot — Run 3 (`P5-1-REDEPLOY`)
+- Redeployed stack in both legacy and LangGraph modes, confirmed via docker compose ps and logs.
+- API/ingestor logs (Datadog MCP): status=info/error, startup and prompt loading only, no defect marker logs.
+- APM spans (Datadog MCP): API startup spans present, no AI/ingestor spans (no test traffic).
+- Plan updated: P5-1 marked DONE with validation notes.
 ### Run 1 — `AFTER-060534` (LangChain mode, blocking endpoints only)
 
 | Category | Count | Notes |
@@ -175,6 +188,13 @@ Follow this order in the chat agent:
 - UI Query tab: improved — TC-13 now PASS with streaming endpoint, previously HTTP 500.
 - Summary path: unchanged — sync and async summary still timeout/fail (TC-09, TC-10, TC-14).
 - Test harness note: TC-07 should wait longer after queue drain before list-scan to account for ChromaDB write latency.
+
+### Streaming Endpoint Baseline Evidence (2026-03-24)
+- migration/benchmark_stream.py executed to benchmark `/defects/query/stream`.
+- Results:
+   - stream,200,94.822,190,4463
+   - first_results_time,0.345
+- This is now the baseline for streaming query performance.
 
 ## Exit Criteria
 After-run suite is considered complete when:

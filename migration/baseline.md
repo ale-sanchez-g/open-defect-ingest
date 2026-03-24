@@ -24,6 +24,25 @@ Single-run spot checks collected during architecture review:
 - list: ~0.329s
 - summary: ~120.124s (timeout/500 observed)
 
+## Streaming Endpoint Baseline (2026-03-24)
+Run from repository root:
+
+```bash
+python3 migration/benchmark_stream.py > /tmp/benchmark_stream.txt && cat /tmp/benchmark_stream.txt
+```
+
+Results:
+
+```
+stream,200,94.822,190,4463
+first_results_time,0.345
+```
+
+- stream: HTTP 200, total time 94.8s, 190 tokens, 4463 bytes streamed
+- first_results_time: 0.345s (time to first results event)
+
+This is now the baseline for `/defects/query/stream` performance after migration.
+
 ## Notes
 - Summary timeout is the highest-priority migration driver.
 - Re-run benchmark script after each completed phase and append deltas here.
