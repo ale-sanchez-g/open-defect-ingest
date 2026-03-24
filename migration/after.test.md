@@ -38,7 +38,6 @@ Minimum required evidence:
 - Summary sync + async behavior with timing and status
 
 Artifact requirement:
-- Persist a JSON report (example: `/tmp/after_api_results.json`) including `TC-01`..`TC-10`.
 
 ### 3) Execute UI validation pass (TC-11..TC-14)
 Open `http://localhost:3000` and validate in this order:

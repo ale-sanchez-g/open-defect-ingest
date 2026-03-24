@@ -218,6 +218,10 @@ services:
       DD_TELEMETRY_ENABLED: ${DD_TELEMETRY_ENABLED:-true}
       DD_AI_TELEMETRY_ENABLED: ${DD_AI_TELEMETRY_ENABLED:-true}
       DD_METRICS_NAMESPACE: ${DD_API_METRICS_NAMESPACE:-open_defect_ingest.api}
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-true}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-<your-langsmith-api-key>}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-open-defect-ingest}
     depends_on:
       datadog-agent:
         condition: service_started

@@ -871,6 +871,83 @@ def query_defects_stream(request: QueryRequest) -> StreamingResponse:
     )
 
 
+def _stream_summary():
+    """SSE generator: emit progress after each analysis step then stream synthesis tokens."""
+    try:
+        collection = _chroma_collection()
+        total = collection.count()
+    except Exception as exc:
+        yield f"event: error\ndata: {json.dumps({'detail': str(exc)})}\n\n"
+        yield "event: done\ndata: {}\n\n"
+        return
+
+    if total == 0:
+        yield f"event: done\ndata: {json.dumps({'total': 0, 'summary': 'No defects have been ingested yet.'})}\n\n"
+        return
+
+    yield f"event: start\ndata: {json.dumps({'total': total})}\n\n"
+
+    raw = collection.get(limit=50, include=["documents"])
+    docs: list[str] = raw.get("documents", [])[:20]
+    context = "\n".join(docs)
+
+    if USE_LANGGRAPH_SUMMARY:
+        try:
+            patterns = _ollama_generate(_render_prompt("summary_analyze_patterns", context=context))
+            yield f"event: progress\ndata: {json.dumps({'step': 'patterns', 'content': patterns})}\n\n"
+
+            severity = _ollama_generate(_render_prompt("summary_analyze_severity", context=context))
+            yield f"event: progress\ndata: {json.dumps({'step': 'severity', 'content': severity})}\n\n"
+
+            critical_areas = _ollama_generate(_render_prompt("summary_analyze_critical_areas", context=context))
+            yield f"event: progress\ndata: {json.dumps({'step': 'critical_areas', 'content': critical_areas})}\n\n"
+
+            synthesis_prompt = _render_prompt(
+                "summary_synthesize",
+                patterns=patterns,
+                severity=severity,
+                critical_areas=critical_areas,
+            )
+        except Exception as exc:
+            yield f"event: error\ndata: {json.dumps({'detail': str(exc)})}\n\n"
+            yield "event: done\ndata: {}\n\n"
+            return
+    else:
+        synthesis_prompt = _render_prompt("legacy_summary", context=context)
+
+    try:
+        with requests.post(
+            f"{OLLAMA_HOST}/api/generate",
+            json={"model": LLM_MODEL, "prompt": synthesis_prompt, "stream": True},
+            stream=True,
+            timeout=SUMMARY_JOB_TIMEOUT_SECONDS,
+        ) as resp:
+            resp.raise_for_status()
+            for raw_line in resp.iter_lines():
+                if not raw_line:
+                    continue
+                chunk = json.loads(raw_line)
+                token = chunk.get("response", "")
+                if token:
+                    yield f"event: token\ndata: {json.dumps({'token': token})}\n\n"
+                if chunk.get("done"):
+                    break
+    except Exception as exc:
+        yield f"event: error\ndata: {json.dumps({'detail': str(exc)})}\n\n"
+
+    yield f"event: done\ndata: {json.dumps({'total': total})}\n\n"
+
+
+@app.get("/defects/summary/stream", tags=["Defects"])
+def defects_summary_stream() -> StreamingResponse:
+    """Streaming summary — emits progress events per analysis step then streams synthesis tokens via SSE."""
+    return StreamingResponse(
+        _stream_summary(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.get("/defects/summary", tags=["Defects"])
 def defects_summary() -> dict[str, Any]:
     """Return an AI-generated summary of all ingested defects (via Ollama LLM)."""

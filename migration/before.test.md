@@ -23,10 +23,6 @@ Expected: all services are `Up` (especially `api`, `ingestor`, `ui`, `rabbitmq`,
 ### 2) Execute API functional pass (TC-01..TC-10)
 Preferred approach is a single scripted run that writes a JSON artifact:
 
-```bash
-python3 /tmp/rerun_api.py > /tmp/rerun_api_stdout.txt 2>&1
-cat /tmp/rerun_api_results.json
-```
 
 Required artifact shape:
 - `run_tag`
