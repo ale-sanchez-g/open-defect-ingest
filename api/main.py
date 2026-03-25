@@ -1,12 +1,14 @@
+
+import ddtrace.auto  # Enables Datadog auto-instrumentation
 """
 Defect Ingest — REST API
 ────────────────────────
 Provides endpoints for:
-  • Publishing defects to RabbitMQ
-  • Querying ChromaDB with semantic search
-  • Fetching an AI-generated summary via the local LLM (Ollama)
-  • Listing ingested defects
-  • Reporting RabbitMQ queue statistics
+    • Publishing defects to RabbitMQ
+    • Querying ChromaDB with semantic search
+    • Fetching an AI-generated summary via the local LLM (Ollama)
+    • Listing ingested defects
+    • Reporting RabbitMQ queue statistics
 """
 
 import json
@@ -28,7 +30,7 @@ from ddtrace import tracer
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from langchain_community.vectorstores import Chroma as LangChainChroma
+from langchain_chroma import Chroma as LangChainChroma
 from langchain_ollama import OllamaEmbeddings
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel
