@@ -497,7 +497,7 @@ def _query_synthesize_node(state: QueryState) -> QueryState:
         query=state["query"],
         context=context,
     )
-    return {"analysis": _ollama_generate(prompt, timeout=45)}
+    return {"analysis": _ollama_generate(prompt, timeout=180)}
 
 
 def _build_query_graph() -> Any:
@@ -912,7 +912,7 @@ async def query_defects_stream(request: QueryRequest) -> StreamingResponse:
                     context=context,
                 )
                 # Call sync LLM in threadpool
-                response = await run_in_threadpool(_ollama_generate, prompt, 45)
+                response = await run_in_threadpool(_ollama_generate, prompt, 180)
                 for token in response.split():
                     await asyncio.sleep(0.01)
                     yield f"event: token\ndata: {json.dumps({'token': token + ' '})}\n\n"
