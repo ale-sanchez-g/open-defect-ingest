@@ -30,6 +30,7 @@ from ddtrace import tracer
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.concurrency import run_in_threadpool
 from langchain_chroma import Chroma as LangChainChroma
 from langchain_ollama import OllamaEmbeddings
 from langgraph.graph import END, START, StateGraph
@@ -138,6 +139,9 @@ app = FastAPI(
     title="Defect Ingest API",
     description="Central API for the Open Defect Ingest system.",
     version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
 )
 
 app.add_middleware(
@@ -558,58 +562,62 @@ def _run_langgraph_query(query: str, n_results: int) -> dict[str, Any]:
 
 def _stream_query_synthesis(query: str, n_results: int):
     """SSE generator: emit retrieval results immediately then stream synthesis tokens."""
-    if USE_LANGGRAPH_QUERY:
-        initial_state: QueryState = {
-            "query": query,
-            "n_results": n_results,
-            "route": "",
-            "results": [],
-            "analysis": "",
-            "trace_id": "",
-            "node_timings_ms": {},
-            "trace_events": [],
-        }
-        route_state = _query_route_node(initial_state)
-        retrieve_state = _query_retrieve_node({**initial_state, **route_state})
-        results = retrieve_state.get("results", [])
-        route = route_state.get("route", "semantic_search")
-    else:
-        results = _run_legacy_query(query, n_results)
-        route = "semantic_search"
+    with tracer.trace("defects.query.stream", resource="stream_query_synthesis") as span:
+        span.set_tag("query", query)
+        span.set_tag("n_results", n_results)
+        try:
+            if USE_LANGGRAPH_QUERY:
+                initial_state: QueryState = {
+                    "query": query,
+                    "n_results": n_results,
+                    "route": "",
+                    "results": [],
+                    "analysis": "",
+                    "trace_id": "",
+                    "node_timings_ms": {},
+                    "trace_events": [],
+                }
+                route_state = _query_route_node(initial_state)
+                retrieve_state = _query_retrieve_node({**initial_state, **route_state})
+                results = retrieve_state.get("results", [])
+                route = route_state.get("route", "semantic_search")
+            else:
+                results = _run_legacy_query(query, n_results)
+                route = "semantic_search"
 
-    yield f"event: results\ndata: {json.dumps({'query': query, 'results': results, 'route': route})}\n\n"
+            yield f"event: results\ndata: {json.dumps({'query': query, 'results': results, 'route': route})}\n\n"
 
-    if not results or not USE_LANGGRAPH_QUERY:
-        yield "event: done\ndata: {}\n\n"
-        return
+            if not results or not USE_LANGGRAPH_QUERY:
+                yield "event: done\ndata: {}\n\n"
+                return
 
-    context = "\n".join(
-        f"- {item['metadata'].get('title', item['id'])}: {item['document'][:280]}"
-        for item in results[:5]
-    )
-    prompt = _render_prompt("query_synthesis", route=route, query=query, context=context)
+            context = "\n".join(
+                f"- {item['metadata'].get('title', item['id'])}: {item['document'][:280]}"
+                for item in results[:5]
+            )
+            prompt = _render_prompt("query_synthesis", route=route, query=query, context=context)
 
-    try:
-        with requests.post(
-            f"{OLLAMA_HOST}/api/generate",
-            json={"model": LLM_MODEL, "prompt": prompt, "stream": True},
-            stream=True,
-            timeout=SUMMARY_JOB_TIMEOUT_SECONDS,
-        ) as resp:
-            resp.raise_for_status()
-            for raw_line in resp.iter_lines():
-                if not raw_line:
-                    continue
-                chunk = json.loads(raw_line)
-                token = chunk.get("response", "")
-                if token:
-                    yield f"event: token\ndata: {json.dumps({'token': token})}\n\n"
-                if chunk.get("done"):
-                    break
-    except Exception as exc:
-        yield f"event: error\ndata: {json.dumps({'detail': str(exc)})}\n\n"
-
-    yield "event: done\ndata: {}\n\n"
+            try:
+                with requests.post(
+                    f"{OLLAMA_HOST}/api/generate",
+                    json={"model": LLM_MODEL, "prompt": prompt, "stream": True},
+                    stream=True,
+                    timeout=SUMMARY_JOB_TIMEOUT_SECONDS,
+                ) as resp:
+                    resp.raise_for_status()
+                    for raw_line in resp.iter_lines():
+                        if not raw_line:
+                            continue
+                        chunk = json.loads(raw_line)
+                        token = chunk.get("response", "")
+                        if token:
+                            yield f"event: token\ndata: {json.dumps({'token': token})}\n\n"
+                        if chunk.get("done"):
+                            break
+            except Exception as exc:
+                yield f"event: error\ndata: {json.dumps({'detail': str(exc)})}\n\n"
+        finally:
+            yield "event: done\ndata: {}\n\n"
 
 
 def _ollama_generate(prompt: str, timeout: int = SUMMARY_JOB_TIMEOUT_SECONDS) -> str:
@@ -863,14 +871,60 @@ def query_defects(request: QueryRequest) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+import asyncio
+
 @app.post("/defects/query/stream", tags=["Defects"])
-def query_defects_stream(request: QueryRequest) -> StreamingResponse:
-    """Streaming semantic search — returns results immediately then streams synthesis tokens via SSE."""
-    return StreamingResponse(
-        _stream_query_synthesis(request.query, int(request.n_results or 5)),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+async def query_defects_stream(request: QueryRequest) -> StreamingResponse:
+    """Streaming semantic search — returns results immediately then streams synthesis tokens via SSE, with Datadog tracing."""
+    async def traced_stream():
+        with tracer.trace("defects.query.stream", resource="stream_query_synthesis") as span:
+            span.set_tag("stream.type", "defects-query-sse")
+            chunk_count = 0
+            start = asyncio.get_event_loop().time()
+            try:
+                # Retrieval phase (run sync code in threadpool)
+                if USE_LANGGRAPH_QUERY:
+                    result = await run_in_threadpool(_run_langgraph_query, request.query, int(request.n_results or 5))
+                    results = result.get("results", [])
+                else:
+                    results = await run_in_threadpool(_run_legacy_query, request.query, int(request.n_results or 5))
+                # Send initial results as SSE event
+                initial_data = {
+                    "results": results,
+                    "query": request.query,
+                    "n_results": request.n_results,
+                }
+                yield f"event: results\ndata: {json.dumps(initial_data)}\n\n"
+                chunk_count += 1
+                span.set_tag("chunk.count", chunk_count)
+
+                # Synthesis phase (simulate streaming tokens)
+                context = "\n".join(
+                    [
+                        f"- {item['metadata'].get('title', item['id'])}: {item['document'][:280]}"
+                        for item in results[:5]
+                    ]
+                )
+                prompt = _render_prompt(
+                    "query_synthesis",
+                    route="semantic_search",
+                    query=request.query,
+                    context=context,
+                )
+                # Call sync LLM in threadpool
+                response = await run_in_threadpool(_ollama_generate, prompt, 45)
+                for token in response.split():
+                    await asyncio.sleep(0.01)
+                    yield f"event: token\ndata: {json.dumps({'token': token + ' '})}\n\n"
+                    chunk_count += 1
+                    span.set_tag("chunk.count", chunk_count)
+                yield "event: done\ndata: {}\n\n"
+                duration = (asyncio.get_event_loop().time() - start) * 1000
+                span.set_tag("stream.duration_ms", duration)
+            except Exception:
+                span.set_exc_info()
+                raise
+    return StreamingResponse(traced_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 def _stream_summary():
