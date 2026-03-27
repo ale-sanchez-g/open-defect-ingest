@@ -12,7 +12,6 @@ Provides endpoints for:
 """
 
 import json
-import logging
 import os
 import threading
 import time
@@ -27,6 +26,7 @@ import pika
 import requests
 from datadog import initialize, statsd
 from ddtrace import tracer
+from ddtrace.llmobs import LLMObs
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -66,6 +66,7 @@ DD_METRICS_NAMESPACE: str = os.getenv("DD_METRICS_NAMESPACE", "open_defect_inges
 
 SUMMARY_JOBS: dict[str, dict[str, Any]] = {}
 SUMMARY_JOBS_LOCK = threading.Lock()
+LLMObs.enable(ml_app="open-defect-api")
 logger = get_datadog_logger(__name__, "open-defect-api")
 
 if DD_TELEMETRY_ENABLED:
@@ -304,6 +305,7 @@ def _load_versioned_prompts() -> None:
 
         for key, value in loaded_prompts.items():
             PROMPTS[key] = value
+        logger.info("Loaded versioned prompts from local files: %s", list(loaded_prompts.keys()))
 
         PROMPT_VERSION = str(metadata.get("version", "local-unknown"))
         PROMPT_SOURCE = "local"
@@ -313,9 +315,16 @@ def _load_versioned_prompts() -> None:
 
 def _render_prompt(prompt_key: str, **kwargs: Any) -> str:
     template = PROMPTS.get(prompt_key, DEFAULT_PROMPTS[prompt_key])
+    # Log which prompt is being used and its source
+    if prompt_key in PROMPTS:
+        logger.info("Using prompt '%s' from PROMPTS (source=%s, version=%s)", prompt_key, PROMPT_SOURCE, PROMPT_VERSION)
+    else:
+        logger.warning("Prompt '%s' not found in PROMPTS, using DEFAULT_PROMPTS", prompt_key)
+    logger.debug("Prompt template for '%s': %r", prompt_key, template)
     rendered = template
     for key, value in kwargs.items():
         rendered = rendered.replace("{" + key + "}", str(value))
+    logger.debug("Rendered prompt for '%s': %r", prompt_key, rendered)
     return rendered
 
 
@@ -324,7 +333,9 @@ def _extract_prompt_content(payload: dict[str, Any]) -> str:
     for key in ("content", "template", "prompt", "body"):
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
+            logger.info("Extracted prompt content using key '%s'", key)
             return value
+    logger.warning("Failed to extract prompt content from OPM payload; no valid keys found")
     return ""
 
 
@@ -424,10 +435,13 @@ def _load_prompts_from_opm_with_fallback() -> None:
                 detail_resp.raise_for_status()
                 payload = detail_resp.json()
                 content = _extract_prompt_content(payload if isinstance(payload, dict) else {})
+                logger.info("Fetched prompt '%s' from OPM endpoint %s with id %s", key, base_url, prompt_id)
                 if not content:
+                    logger.warning("No content extracted for prompt '%s' from OPM endpoint %s; skipping", key, base_url)
                     continue
 
                 PROMPTS[key] = content.strip()
+                logger.info("OPM prompt '%s' applied and available in PROMPTS", key)
                 applied += 1
                 versions.append(str(entry.get("version", "unknown")))
 
@@ -622,12 +636,20 @@ def _stream_query_synthesis(query: str, n_results: int):
 
 def _ollama_generate(prompt: str, timeout: int = SUMMARY_JOB_TIMEOUT_SECONDS) -> str:
     started_at = time.monotonic()
-    with tracer.trace("ai.ollama.completion", resource="generate") as span:
-        span.set_tag("ai.provider", "ollama")
-        span.set_tag("ai.model", LLM_MODEL)
-        span.set_tag("ai.operation", "completion")
-        span.set_tag("ai.telemetry.enabled", DD_AI_TELEMETRY_ENABLED)
-        span.set_metric("ai.prompt.characters", float(len(prompt)))
+
+    with LLMObs.llm(
+        model_name=LLM_MODEL,
+        model_provider="ollama",
+        name="ollama.completion",
+    ) as llm_span:
+        # Annotate with structured input messages (role + content format)
+        LLMObs.annotate(
+            span=llm_span,
+            input_data=[{"role": "user", "content": prompt}],
+            metadata={
+                "ai.telemetry.enabled": DD_AI_TELEMETRY_ENABLED,
+            },
+        )
 
         try:
             llm_resp = requests.post(
@@ -639,14 +661,26 @@ def _ollama_generate(prompt: str, timeout: int = SUMMARY_JOB_TIMEOUT_SECONDS) ->
             response_text = llm_resp.json().get("response", "Unable to generate summary.")
 
             elapsed_ms = (time.monotonic() - started_at) * 1000
+
+            # Annotate with output and metrics after the call
+            LLMObs.annotate(
+                span=llm_span,
+                output_data=[{"role": "assistant", "content": response_text}],
+                metrics={
+                    "input_tokens": float(len(prompt.split())),   # estimate if Ollama doesn't return tokens
+                    "output_tokens": float(len(response_text.split())),
+                },
+            )
+
             _dd_increment("ollama.completion.requests", tags=["model:" + LLM_MODEL, "status:success"])
             _dd_timing("ollama.completion.latency_ms", elapsed_ms, tags=["model:" + LLM_MODEL])
-            span.set_metric("ai.response.characters", float(len(response_text)))
+
             return response_text
+
         except Exception:
+            # LLMObs will automatically tag the span as errored
             _dd_increment("ollama.completion.requests", tags=["model:" + LLM_MODEL, "status:error"])
             raise
-
 
 def _summary_select_documents(state: SummaryState) -> SummaryState:
     selected = state.get("documents", [])[:20]
@@ -877,6 +911,7 @@ import asyncio
 async def query_defects_stream(request: QueryRequest) -> StreamingResponse:
     """Streaming semantic search — returns results immediately then streams synthesis tokens via SSE, with Datadog tracing."""
     async def traced_stream():
+        logger.info("/defects/query/stream called with query=%r n_results=%r", request.query, request.n_results)
         with tracer.trace("defects.query.stream", resource="stream_query_synthesis") as span:
             span.set_tag("stream.type", "defects-query-sse")
             chunk_count = 0
@@ -911,6 +946,7 @@ async def query_defects_stream(request: QueryRequest) -> StreamingResponse:
                     query=request.query,
                     context=context,
                 )
+                logger.info("Prompt used for synthesis in /defects/query/stream: %r", prompt)
                 # Call sync LLM in threadpool
                 response = await run_in_threadpool(_ollama_generate, prompt, 180)
                 for token in response.split():
