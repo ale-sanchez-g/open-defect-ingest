@@ -200,15 +200,22 @@ def _chroma_collection() -> Any:
     client = chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
     return client.get_or_create_collection(COLLECTION_NAME)
 
-
 def _get_embedding(text: str) -> list[float]:
     started_at = time.monotonic()
-    with tracer.trace("ai.ollama.embeddings", resource="embeddings") as span:
-        span.set_tag("ai.provider", "ollama")
-        span.set_tag("ai.model", EMBED_MODEL)
-        span.set_tag("ai.operation", "embeddings")
-        span.set_tag("ai.telemetry.enabled", DD_AI_TELEMETRY_ENABLED)
-        span.set_metric("ai.prompt.characters", float(len(text)))
+
+    with LLMObs.embedding(
+        model_name=EMBED_MODEL,
+        model_provider="ollama",
+        name="ollama.embeddings",
+    ) as embedding_span:
+        # Annotate input as a list of embedding inputs (SDK expects this format)
+        LLMObs.annotate(
+            span=embedding_span,
+            input_data=[{"text": text}],
+            metadata={
+                "ai.telemetry.enabled": DD_AI_TELEMETRY_ENABLED,
+            },
+        )
 
         try:
             resp = requests.post(
@@ -221,10 +228,21 @@ def _get_embedding(text: str) -> list[float]:
             embedding = payload["embedding"]
 
             elapsed_ms = (time.monotonic() - started_at) * 1000
+
+            # Annotate output as list of embedding vectors
+            LLMObs.annotate(
+                span=embedding_span,
+                output_data=[{"text": text, "embedding": embedding}],
+                metrics={
+                    "input_tokens": float(len(text.split())),  # estimate; Ollama doesn't return token counts for embeddings
+                },
+            )
+
             _dd_increment("ollama.embedding.requests", tags=["model:" + EMBED_MODEL, "status:success"])
             _dd_timing("ollama.embedding.latency_ms", elapsed_ms, tags=["model:" + EMBED_MODEL])
-            span.set_metric("ai.response.vector_size", float(len(embedding)))
+
             return embedding
+
         except Exception:
             _dd_increment("ollama.embedding.requests", tags=["model:" + EMBED_MODEL, "status:error"])
             raise
