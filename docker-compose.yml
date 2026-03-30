@@ -1,0 +1,259 @@
+services:
+  # ── Datadog observability agent ──────────────────────────────────────────────
+  datadog-agent:
+    image: datadog/agent:7
+    labels:
+      com.datadoghq.ad.logs: '[{"source":"datadog-agent","service":"open-defect-datadog-agent"}]'
+      com.datadoghq.tags.env: "${DD_ENV:-local}"
+      com.datadoghq.tags.service: "open-defect-datadog-agent"
+      com.datadoghq.tags.version: "${DD_VERSION:-1.0.0}"
+      my.custom.label.team: "platform"
+    environment:
+      DD_API_KEY: ${DD_API_KEY:-}
+      DD_SITE: ${DD_SITE:-datadoghq.com}
+      DD_ENV: ${DD_ENV:-local}
+      DD_HOSTNAME: open-defect-ingest-local
+      DD_APM_ENABLED: "true"
+      DD_APM_NON_LOCAL_TRAFFIC: "true"
+      DD_LOGS_ENABLED: "true"
+      DD_LOGS_CONFIG_CONTAINER_COLLECT_ALL: "true"
+      DD_DOGSTATSD_NON_LOCAL_TRAFFIC: "true"
+      DD_PROCESS_AGENT_ENABLED: "true"
+    ports:
+      - "8126:8126"
+      - "8125:8125/udp"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /proc/:/host/proc/:ro
+      - /sys/fs/cgroup/:/host/sys/fs/cgroup:ro
+    restart: unless-stopped
+
+  # ── Message broker ──────────────────────────────────────────────────────────
+  rabbitmq:
+    image: rabbitmq:3-management
+    labels:
+      com.datadoghq.ad.logs: '[{"source":"rabbitmq","service":"open-defect-rabbitmq"}]'
+      com.datadoghq.tags.env: "${DD_ENV:-local}"
+      com.datadoghq.tags.service: "open-defect-rabbitmq"
+      com.datadoghq.tags.version: "${DD_VERSION:-1.0.0}"
+      my.custom.label.team: "platform"
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-guest}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # ── Vector database ─────────────────────────────────────────────────────────
+  chromadb:
+    image: chromadb/chroma:0.5.23
+    labels:
+      com.datadoghq.ad.logs: '[{"source":"python","service":"open-defect-chromadb"}]'
+      com.datadoghq.tags.env: "${DD_ENV:-local}"
+      com.datadoghq.tags.service: "open-defect-chromadb"
+      com.datadoghq.tags.version: "${DD_VERSION:-1.0.0}"
+      my.custom.label.team: "platform"
+    expose:
+      - "8000"
+    environment:
+      IS_PERSISTENT: "TRUE"
+      ANONYMIZED_TELEMETRY: "FALSE"
+    volumes:
+      - chroma_data:/chroma/chroma
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/8000'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # ── Local LLM (embeddings + generation) ─────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    labels:
+      com.datadoghq.ad.logs: '[{"source":"docker","service":"open-defect-ollama"}]'
+      com.datadoghq.tags.env: "${DD_ENV:-local}"
+      com.datadoghq.tags.service: "open-defect-ollama"
+      com.datadoghq.tags.version: "${DD_VERSION:-1.0.0}"
+      my.custom.label.team: "platform"
+    ports:
+      - "11434:11434"
+    cpus: "6.0"
+    mem_limit: "12g"
+    mem_reservation: "10g"
+    environment:
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-2}
+      OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-2}
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-45m}
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/11434'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # One-time model-pull job (runs after ollama is healthy, then exits)
+  ollama-setup:
+    image: ollama/ollama:latest
+    labels:
+      com.datadoghq.ad.logs: '[{"source":"docker","service":"open-defect-ollama-setup"}]'
+      com.datadoghq.tags.env: "${DD_ENV:-local}"
+      com.datadoghq.tags.service: "open-defect-ollama-setup"
+      com.datadoghq.tags.version: "${DD_VERSION:-1.0.0}"
+      my.custom.label.team: "platform"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ollama pull nomic-embed-text
+        ollama pull llama3.2
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: "no"
+
+  # ── Defect ingestor worker ───────────────────────────────────────────────────
+  ingestor:
+    build:
+      context: .
+      dockerfile: ingestor/Dockerfile
+    labels:
+      com.datadoghq.ad.logs: '[{"source":"nginx","service":"${DD_INGESTOR_SERVICE:-open-defect-ingestor}"}]'
+      com.datadoghq.tags.env: "${DD_ENV:-local}"
+      com.datadoghq.tags.service: "${DD_INGESTOR_SERVICE:-open-defect-ingestor}"
+      com.datadoghq.tags.version: "${DD_VERSION:-1.0.0}"
+      my.custom.label.team: "ingestion"
+    environment:
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672/
+      CHROMA_HOST: chromadb
+      CHROMA_PORT: "8000"
+      OLLAMA_HOST: http://ollama:11434
+      EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
+      QUEUE_NAME: ${QUEUE_NAME:-defects}
+      PREFETCH_COUNT: ${PREFETCH_COUNT:-1}
+      METRICS_LOG_INTERVAL_SECONDS: ${METRICS_LOG_INTERVAL_SECONDS:-30}
+      DLX_EXCHANGE: ${DLX_EXCHANGE:-defects.dlx}
+      DLQ_NAME: ${DLQ_NAME:-defects.dlq}
+      DD_SERVICE: ${DD_INGESTOR_SERVICE:-open-defect-ingestor}
+      DD_ENV: ${DD_ENV:-local}
+      DD_VERSION: ${DD_VERSION:-1.0.0}
+      DD_TRACE_ENABLED: ${DD_TRACE_ENABLED:-true}
+      DD_TRACE_LANGCHAIN_ENABLED: ${DD_TRACE_LANGCHAIN_ENABLED:-false}
+      DD_LOGS_INJECTION: ${DD_LOGS_INJECTION:-true}
+      DD_RUNTIME_METRICS_ENABLED: ${DD_RUNTIME_METRICS_ENABLED:-true}
+      DD_PROFILING_ENABLED: ${DD_PROFILING_ENABLED:-true}
+      DD_AGENT_HOST: ${DD_AGENT_HOST:-datadog-agent}
+      DD_TRACE_AGENT_PORT: ${DD_TRACE_AGENT_PORT:-8126}
+      DD_DOGSTATSD_PORT: ${DD_DOGSTATSD_PORT:-8125}
+      DD_TELEMETRY_ENABLED: ${DD_TELEMETRY_ENABLED:-true}
+      DD_AI_TELEMETRY_ENABLED: ${DD_AI_TELEMETRY_ENABLED:-true}
+      DD_METRICS_NAMESPACE: ${DD_INGESTOR_METRICS_NAMESPACE:-open_defect_ingest.ingestor}
+      DD_LLMOBS_ENABLED: ${DD_LLMOBS_ENABLED:-true}
+      DD_LLMOBS_ML_APP: ${DD_INGESTOR_METRICS_NAMESPACE:-open_defect_ingest.ingestor}
+    depends_on:
+      datadog-agent:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── REST API ─────────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    labels:
+      com.datadoghq.ad.logs: '[{"source":"nginx","service":"${DD_API_SERVICE:-open-defect-api}"}]'
+      com.datadoghq.tags.env: "${DD_ENV:-local}"
+      com.datadoghq.tags.service: "${DD_API_SERVICE:-open-defect-api}"
+      com.datadoghq.tags.version: "${DD_VERSION:-1.0.0}"
+      my.custom.label.team: "api"
+    ports:
+      - "8080:8080"
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_PASS: ${RABBITMQ_PASS:-guest}
+      CHROMA_HOST: chromadb
+      CHROMA_PORT: "8000"
+      OLLAMA_HOST: http://ollama:11434
+      EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
+      LLM_MODEL: ${LLM_MODEL:-llama3.2}
+      QUEUE_NAME: ${QUEUE_NAME:-defects}
+      DLX_EXCHANGE: ${DLX_EXCHANGE:-defects.dlx}
+      DLQ_NAME: ${DLQ_NAME:-defects.dlq}
+      USE_LANGGRAPH_QUERY: ${USE_LANGGRAPH_QUERY:-false}
+      USE_LANGGRAPH_SUMMARY: ${USE_LANGGRAPH_SUMMARY:-false}
+      GRAPH_TRACE_ENABLED: ${GRAPH_TRACE_ENABLED:-true}
+      PROMPT_STRATEGY: ${PROMPT_STRATEGY:-local_versioned}
+      PROMPTS_DIR: ${PROMPTS_DIR:-/app/prompts}
+      OPM_BASE_URL: ${OPM_BASE_URL:-}
+      OPM_TIMEOUT_SECONDS: ${OPM_TIMEOUT_SECONDS:-5}
+      DD_SERVICE: ${DD_API_SERVICE:-open-defect-api}
+      DD_ENV: ${DD_ENV:-local}
+      DD_VERSION: ${DD_VERSION:-1.0.0}
+      DD_TRACE_ENABLED: ${DD_TRACE_ENABLED:-true}
+      DD_TRACE_LANGCHAIN_ENABLED: ${DD_TRACE_LANGCHAIN_ENABLED:-false}
+      DD_LOGS_INJECTION: ${DD_LOGS_INJECTION:-true}
+      DD_RUNTIME_METRICS_ENABLED: ${DD_RUNTIME_METRICS_ENABLED:-true}
+      DD_PROFILING_ENABLED: ${DD_PROFILING_ENABLED:-true}
+      DD_AGENT_HOST: ${DD_AGENT_HOST:-datadog-agent}
+      DD_TRACE_AGENT_PORT: ${DD_TRACE_AGENT_PORT:-8126}
+      DD_DOGSTATSD_PORT: ${DD_DOGSTATSD_PORT:-8125}
+      DD_TELEMETRY_ENABLED: ${DD_TELEMETRY_ENABLED:-false}
+      DD_AI_TELEMETRY_ENABLED: ${DD_AI_TELEMETRY_ENABLED:-true}
+      DD_METRICS_NAMESPACE: ${DD_API_METRICS_NAMESPACE:-open_defect_ingest.api}
+      DD_LLMOBS_ENABLED: ${DD_LLMOBS_ENABLED:-1}
+      DD_LLMOBS_ML_APP: ${DD_API_METRICS_NAMESPACE:-open_defect_ingest.api}
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-true}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-<your-langsmith-api-key>}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-open-defect-ingest}
+    depends_on:
+      datadog-agent:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Web UI ────────────────────────────────────────────────────────────────────
+  ui:
+    build:
+      context: ./ui
+    labels:
+      com.datadoghq.ad.logs: '[{"source":"nginx","service":"open-defect-ui"}]'
+      com.datadoghq.tags.env: "${DD_ENV:-local}"
+      com.datadoghq.tags.service: "open-defect-ui"
+      com.datadoghq.tags.version: "${DD_VERSION:-1.0.0}"
+      my.custom.label.team: "frontend"
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  rabbitmq_data:
+  chroma_data:
+  ollama_data:

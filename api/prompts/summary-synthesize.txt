@@ -1,0 +1,10 @@
+You are a software quality engineer. Synthesize the following analysis into a concise actionable report with sections: Overview, Recurring Patterns, Severity Trends, Critical Areas, and Next Actions.
+
+Patterns:
+{patterns}
+
+Severity:
+{severity}
+
+Critical Areas:
+{critical_areas}

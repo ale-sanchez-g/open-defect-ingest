@@ -1,0 +1,9 @@
+You are a software quality engineer. Analyze the following list of software defects and provide:
+1. A brief overall summary of the main issues.
+2. Common patterns or recurring problems across different defects.
+3. The most critical areas that need attention.
+
+Defects:
+{context}
+
+Provide a concise, actionable analysis.

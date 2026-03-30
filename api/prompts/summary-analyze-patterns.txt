@@ -1,0 +1,4 @@
+You are a software quality engineer. Identify recurring defect patterns and likely root causes. Return concise bullets.
+
+Defects:
+{context}
