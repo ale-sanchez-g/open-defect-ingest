@@ -27,6 +27,7 @@ import requests
 from datadog import initialize, statsd
 from ddtrace import tracer
 from ddtrace.llmobs import LLMObs
+from shared.embedding_utils import get_embedding, configure_embedding_utils
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -200,53 +201,15 @@ def _chroma_collection() -> Any:
     client = chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
     return client.get_or_create_collection(COLLECTION_NAME)
 
-def _get_embedding(text: str) -> list[float]:
-    started_at = time.monotonic()
 
-    with LLMObs.embedding(
-        model_name=EMBED_MODEL,
-        model_provider="ollama",
-        name="ollama.embeddings",
-    ) as embedding_span:
-        # Annotate input as a list of embedding inputs (SDK expects this format)
-        LLMObs.annotate(
-            span=embedding_span,
-            input_data=[{"text": text}],
-            metadata={
-                "ai.telemetry.enabled": DD_AI_TELEMETRY_ENABLED,
-            },
-        )
-
-        try:
-            resp = requests.post(
-                f"{OLLAMA_HOST}/api/embeddings",
-                json={"model": EMBED_MODEL, "prompt": text},
-                timeout=60,
-            )
-            resp.raise_for_status()
-            payload = resp.json()
-            embedding = payload["embedding"]
-
-            elapsed_ms = (time.monotonic() - started_at) * 1000
-
-            # Annotate output as list of embedding vectors
-            LLMObs.annotate(
-                span=embedding_span,
-                output_data=[{"text": text, "embedding": embedding}],
-                metrics={
-                    "input_tokens": float(len(text.split())),  # estimate; Ollama doesn't return token counts for embeddings
-                },
-            )
-
-            _dd_increment("ollama.embedding.requests", tags=["model:" + EMBED_MODEL, "status:success"])
-            _dd_timing("ollama.embedding.latency_ms", elapsed_ms, tags=["model:" + EMBED_MODEL])
-
-            return embedding
-
-        except Exception:
-            _dd_increment("ollama.embedding.requests", tags=["model:" + EMBED_MODEL, "status:error"])
-            raise
-
+# Configure shared embedding utils
+configure_embedding_utils(
+    embed_model=EMBED_MODEL,
+    ollama_host=OLLAMA_HOST,
+    ai_telemetry_enabled=DD_AI_TELEMETRY_ENABLED,
+    dd_increment=_dd_increment,
+    dd_timing=_dd_timing,
+)
 
 def _langchain_retriever(k: int) -> Any:
     chroma_client = chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)

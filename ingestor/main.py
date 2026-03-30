@@ -6,7 +6,6 @@ and stores them in ChromaDB for later querying.
 """
 
 import json
-import logging
 import os
 import time
 from datetime import datetime, timezone
@@ -17,8 +16,11 @@ import pika
 import requests
 from datadog import initialize, statsd
 from ddtrace import tracer
+from ddtrace.llmobs import LLMObs
+from shared.embedding_utils import get_embedding, configure_embedding_utils
 from shared.logging_utils import get_datadog_logger
 
+LLMObs.enable(ml_app="open-defect-ingestor")
 logger = get_datadog_logger(__name__, "open-defect-ingestor")
 
 # ── Configuration ────────────────────────────────────────────────────────────
@@ -73,39 +75,15 @@ METRICS: dict[str, float] = {
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def get_embedding(
-    text: str,
-    ollama_host: str = OLLAMA_HOST,
-    model: str = EMBED_MODEL,
-) -> list[float]:
-    """Return a vector embedding for *text* produced by Ollama."""
-    started_at = time.monotonic()
-    with tracer.trace("ai.ollama.embeddings", resource="embeddings") as span:
-        span.set_tag("ai.provider", "ollama")
-        span.set_tag("ai.model", model)
-        span.set_tag("ai.operation", "embeddings")
-        span.set_tag("ai.telemetry.enabled", DD_AI_TELEMETRY_ENABLED)
-        span.set_metric("ai.prompt.characters", float(len(text)))
 
-        try:
-            response = requests.post(
-                f"{ollama_host}/api/embeddings",
-                json={"model": model, "prompt": text},
-                timeout=60,
-            )
-            response.raise_for_status()
-            payload = response.json()
-            embedding = payload["embedding"]
-
-            elapsed_ms = (time.monotonic() - started_at) * 1000
-            _dd_increment("ollama.embedding.requests", tags=["model:" + model, "status:success"])
-            _dd_timing("ollama.embedding.latency_ms", elapsed_ms, tags=["model:" + model])
-            span.set_metric("ai.response.vector_size", float(len(embedding)))
-            return embedding
-        except Exception:
-            _dd_increment("ollama.embedding.requests", tags=["model:" + model, "status:error"])
-            raise
-
+# Configure shared embedding utils
+configure_embedding_utils(
+    embed_model=EMBED_MODEL,
+    ollama_host=OLLAMA_HOST,
+    ai_telemetry_enabled=DD_AI_TELEMETRY_ENABLED,
+    dd_increment=_dd_increment,
+    dd_timing=_dd_timing,
+)
 
 def store_defect(
     defect: dict[str, Any],
