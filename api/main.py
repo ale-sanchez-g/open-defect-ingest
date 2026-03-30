@@ -512,7 +512,7 @@ QUERY_GRAPH = _build_query_graph()
 
 
 def _run_legacy_query(query: str, n_results: int) -> list[dict[str, Any]]:
-    query_embedding = _get_embedding(query)
+    query_embedding = get_embedding(query)
     collection = _chroma_collection()
     raw = collection.query(
         query_embeddings=[query_embedding],
